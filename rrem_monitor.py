@@ -4,7 +4,7 @@ import cv2
 import os
 import threading
 from ultralytics import YOLO
-from utils import HazardAnalyzer, draw_alert
+from utils import HazardAnalyzer, draw_alert, LaneTracker
 
 class RREMMonitor:
     def __init__(self, model_path="yolo11n.pt", conf_threshold=0.25):
@@ -12,6 +12,7 @@ class RREMMonitor:
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         self.analyzer = HazardAnalyzer()
+        self.lane_tracker = LaneTracker()
         self.all_detected_hazards = set()
         self.prev_time = 0
         
@@ -67,7 +68,8 @@ class RREMMonitor:
 
         # Process detections
         frame_shape = frame.shape
-        current_alerts = self.analyzer.analyze(result.boxes, result.names, frame_shape)
+        lane_x1, lane_x2 = self.lane_tracker.update(frame)
+        current_alerts = self.analyzer.analyze(result.boxes, result.names, frame_shape, lane_bounds=(lane_x1, lane_x2))
         
         # PERSISTENCE & VOICE
         curr_time = time.time()
@@ -102,8 +104,8 @@ class RREMMonitor:
 
         # VISUALIZE LANE & DANGER ZONE
         h, w = frame.shape[:2]
-        x1 = int(w * 0.25)
-        x2 = int(w * 0.75)
+        x1 = lane_x1
+        x2 = lane_x2
         # Draw translucent overlay or lines? Lines are cleaner for speed.
         # Cyan lines
         cv2.line(annotated_frame, (x1, 0), (x1, h), (255, 255, 0), 2)

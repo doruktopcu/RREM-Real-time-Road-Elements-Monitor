@@ -33,6 +33,112 @@ BIKER_CLASSES = [
     3 # motorcycle
 ]
 
+import numpy as np
+
+# ... (Existing constants unchanged) ...
+
+class LaneTracker:
+    def __init__(self):
+        # Smoothing factors
+        self.avg_x1 = 0
+        self.avg_x2 = 0
+        self.initialized = False
+        self.alpha = 0.2 # Exponential Moving Average factor (0.0 - 1.0)
+        
+    def update(self, frame):
+        """
+        Detects lane lines and returns dynamic (x1, x2) bounds.
+        Fallback to None if detection fails.
+        """
+        if frame is None: return None, None
+        
+        h, w = frame.shape[:2]
+        
+        # Region of Interest: Bottom Half only
+        roi = frame[h//2:, :]
+        
+        # 1. Edge Detection / Color Filtering
+        # White properties
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blur, 50, 150)
+        
+        # 2. Hough Lines
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, 50, minLineLength=50, maxLineGap=50)
+        
+        left_lines = []
+        right_lines = []
+        
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                # Avoid vertical/horizontal noise
+                if x2 - x1 == 0: continue
+                slope = (y2 - y1) / (x2 - x1)
+                
+                # Check for reasonable slopes for road lanes
+                # Left lane: Negative slope (usually -0.5 to -2.0)
+                # Right lane: Positive slope (usually 0.5 to 2.0)
+                if -2.5 < slope < -0.3:
+                    left_lines.append(line[0])
+                elif 0.3 < slope < 2.5:
+                    right_lines.append(line[0])
+                    
+        # 3. Fit Average Lines (Using x-intercept at bottom of frame)
+        
+        current_x1 = None
+        current_x2 = None
+        
+        if left_lines:
+            try:
+                # Collect all points
+                lx = []
+                ly = []
+                for l in left_lines:
+                    lx.extend([l[0], l[2]])
+                    ly.extend([l[1], l[3]])
+                poly_left = np.poly1d(np.polyfit(ly, lx, 1)) # Fit x as function of y
+                current_x1 = int(poly_left(h//2)) # x at bottom of ROI 
+            except: pass
+
+        if right_lines:
+            try:
+                rx = []
+                ry = []
+                for l in right_lines:
+                    rx.extend([l[0], l[2]])
+                    ry.extend([l[1], l[3]])
+                poly_right = np.poly1d(np.polyfit(ry, rx, 1))
+                current_x2 = int(poly_right(h//2))
+            except: pass
+            
+        # Defaults if detection fails (Centered 50%)
+        default_x1 = int(w * 0.25)
+        default_x2 = int(w * 0.75)
+        
+        # 4. Smoothing (EMA)
+        if not self.initialized:
+            self.avg_x1 = current_x1 if current_x1 else default_x1
+            self.avg_x2 = current_x2 if current_x2 else default_x2
+            self.initialized = True
+        else:
+            if current_x1:
+                self.avg_x1 = self.alpha * current_x1 + (1 - self.alpha) * self.avg_x1
+            else:
+                # Decay towards default if lost
+                self.avg_x1 = self.alpha * default_x1 + (1 - self.alpha) * self.avg_x1
+                
+            if current_x2:
+                self.avg_x2 = self.alpha * current_x2 + (1 - self.alpha) * self.avg_x2
+            else:
+                 self.avg_x2 = self.alpha * default_x2 + (1 - self.alpha) * self.avg_x2
+                 
+        # Safety Clamps
+        self.avg_x1 = max(0, min(self.avg_x1, w//2 - 50))
+        self.avg_x2 = max(w//2 + 50, min(self.avg_x2, w))
+        
+        return int(self.avg_x1), int(self.avg_x2)
+
 class HazardAnalyzer:
     def __init__(self):
         # Store history: {track_id: {'area': [float], 'center': [(x,y)], 'last_seen': timestamp}}
@@ -41,7 +147,7 @@ class HazardAnalyzer:
         self.fast_approach_threshold = 0.05 # 5% growth per frame approx
         self.side_aspect_ratio_threshold = 1.6 # Width / Height
         
-    def analyze(self, boxes, names, frame_shape=None):
+    def analyze(self, boxes, names, frame_shape=None, lane_bounds=None):
         alerts = []
         
         current_ids = []
@@ -74,21 +180,21 @@ class HazardAnalyzer:
                     direction_str = " (Ahead)"
 
             # Lane Logic
-            # Define Lane roughly as 25% to 75% of width
+            # Use dynamic bounds if provided, else fallback to 25%-75%
             lane_x1 = 0
             lane_x2 = 0
-            if frame_shape:
+            
+            if lane_bounds:
+                lane_x1, lane_x2 = lane_bounds
+            elif frame_shape:
                 w_frame = frame_shape[1]
                 lane_x1 = w_frame * 0.25
                 lane_x2 = w_frame * 0.75
                 
             in_lane = False
-            if frame_shape:
-                if center_x > lane_x1 and center_x < lane_x2:
-                    in_lane = True
-            else:
-                in_lane = True # Default to true if no shape to filter safely? Or False?
-                # Let's default to True for safety if shape unknown
+            # Check if center is within lane bounds
+            if center_x > lane_x1 and center_x < lane_x2:
+                 in_lane = True
             
             # Tracking for Approach/Merge
             is_approaching = False
