@@ -56,6 +56,22 @@ class RREMGUI:
         self.btn_zoom_in = ttk.Button(control_frame, text="+", width=3, command=lambda: self.change_zoom(0.1), state=tk.DISABLED)
         self.btn_zoom_in.pack(side=tk.LEFT, padx=2)
         
+        # Model Selection
+        self.lbl_model = ttk.Label(control_frame, text="Model:")
+        self.lbl_model.pack(side=tk.LEFT, padx=(10, 2))
+        
+        # User-friendly names mapped to internal paths/identifiers
+        self.model_map = {
+            "YOLOv11 Nano": "yolo11n.pt",
+            "YOLOv11 Small": "yolo11s.pt",
+            "Custom RREM Model": "best.pt"
+        }
+        
+        self.model_var = tk.StringVar(value="YOLOv11 Nano")
+        self.combo_model = ttk.Combobox(control_frame, textvariable=self.model_var, values=list(self.model_map.keys()), width=25, state="readonly")
+        self.combo_model.pack(side=tk.LEFT, padx=2)
+        self.combo_model.bind("<<ComboboxSelected>>", self.on_model_change)
+        
         self.lbl_status = ttk.Label(control_frame, text="Status: Idle", foreground="gray")
         self.lbl_status.pack(side=tk.RIGHT, padx=5)
 
@@ -148,18 +164,34 @@ class RREMGUI:
             # If paused, we need to grab the new frame specifically to update UI
             frame, _ = self.monitor.process_frame()
             if frame is not None:
-                # Convert CV2 frame (BGR) to RGB for Tkinter
-                cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(cv2image)
-                self.current_frame_img = img
-                self.root.after(0, self.update_gui_image, img)
+                self.current_frame_bgr = frame
+                self.root.after(0, self.update_gui_image, frame)
     
     def change_zoom(self, delta):
         self.zoom_level = max(0.2, min(5.0, self.zoom_level + delta))
         self.lbl_zoom.config(text=f"{int(self.zoom_level * 100)}%")
         # Force redraw if paused
-        if self.paused and self.current_frame_img:
-            self.root.after(0, self.update_gui_image, self.current_frame_img)
+        if self.paused and hasattr(self, 'current_frame_bgr') and self.current_frame_bgr is not None:
+            self.root.after(0, self.update_gui_image, self.current_frame_bgr)
+
+    def on_model_change(self, event):
+        selected_name = self.model_var.get()
+        # Default to yolo11n if not found, but map should cover it
+        model_path = self.model_map.get(selected_name, "yolo11n.pt")
+        
+        self.lbl_status.config(text=f"Loading {selected_name}...", foreground="orange")
+        self.root.update() # Force GUI update
+        
+        # Run in separate thread to not block GUI completely
+        def load_task():
+             success, msg = self.monitor.load_model(model_path)
+             if success:
+                 self.lbl_status.config(text=f"Loaded: {selected_name}", foreground="green")
+             else:
+                 self.lbl_status.config(text=f"Load Failed: {msg}", foreground="red")
+                 tk.messagebox.showerror("Model Load Error", f"Failed to load {selected_name}.\nError: {msg}")
+                 
+        threading.Thread(target=load_task, daemon=True).start()
 
     def update_feed(self):
         while self.running:
@@ -172,13 +204,13 @@ class RREMGUI:
                     self.root.after(0, self.reset_buttons)
                     break
                 
-                # Convert CV2 frame (BGR) to RGB for Tkinter
-                cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(cv2image)
-                self.current_frame_img = img # Store for redraws
+                # Pass BGR frame directly to main thread for resizing (faster)
+                # We need to make a copy if we want to store it for "seek" or "pause" redraws?
+                # Actually current_frame_img was used for redraws. Let's store the BGR frame.
+                self.current_frame_bgr = frame
                 
-                # Update GUI in main thread - passing the PIL image object
-                self.root.after(0, self.update_gui_image, img)
+                # Update GUI in main thread - passing the BGR numpy array
+                self.root.after(0, self.update_gui_image, frame)
                 
                 if alerts:
                     timestamp = time.strftime("%H:%M:%S")
@@ -190,8 +222,9 @@ class RREMGUI:
             # Control frame rate roughly
             time.sleep(0.01)
 
-    def update_gui_image(self, img_pil):
+    def update_gui_image(self, img_bgr):
         # RESIZE LOGIC HERE (Main Thread)
+        # Use cv2.resize for speed instead of PIL
         win_w = self.root.winfo_width()
         win_h = self.root.winfo_height()
         
@@ -199,14 +232,20 @@ class RREMGUI:
             target_w = int(win_w * 0.6 * self.zoom_level) # Apply Zoom
             target_h = int(win_h * 0.6 * self.zoom_level)
             
-            aspect_ratio = img_pil.width / img_pil.height
+            # Use CV2 for fast resizing (interpolating usually default LINEAR is fast and good)
+            # Calculate new dimensions preserving aspect ratio
+            h, w = img_bgr.shape[:2]
+            aspect_ratio = w / h
             new_h = int(target_w / aspect_ratio)
             
-            # Bounds logic (optional: limit max size? nah let them zoom)
+            # Resize
+            img_bgr = cv2.resize(img_bgr, (target_w, new_h), interpolation=cv2.INTER_LINEAR)
             
-            # Use resize (not thumbnail) to force exact fit
-            img_pil = img_pil.resize((target_w, new_h), Image.Resampling.LANCZOS)
-            
+        # Convert to RGB and then PIL
+        cv2image = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        img_pil = Image.fromarray(cv2image)
+        
+        # Keep reference to prevent GC
         imgtk = ImageTk.PhotoImage(image=img_pil)
         
         self.video_label.imgtk = imgtk # Keep reference

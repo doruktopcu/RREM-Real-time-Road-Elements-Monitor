@@ -1,15 +1,25 @@
 import argparse
 import time
+import torch
 import cv2
 import os
 import threading
 from ultralytics import YOLO
-from utils import HazardAnalyzer, draw_alert, LaneTracker
+from utils import HazardAnalyzer, draw_alert, LaneTracker, SimpleTracker, HazardStabilizer
+
+
 
 class RREMMonitor:
     def __init__(self, model_path="yolo11n.pt", conf_threshold=0.25):
-        print(f"Loading model: {model_path}...")
-        self.model = YOLO(model_path)
+        # Hardware Acceleration Check
+        self.device = 'cpu'
+        if torch.backends.mps.is_available():
+            self.device = 'mps'
+            print("Using Apple Metal (MPS) acceleration!")
+        elif torch.cuda.is_available():
+            self.device = 'cuda'
+            print("Using CUDA acceleration!")
+            
         self.conf_threshold = conf_threshold
         self.analyzer = HazardAnalyzer()
         self.lane_tracker = LaneTracker()
@@ -24,6 +34,60 @@ class RREMMonitor:
         # State for capture
         self.cap = None
         self.source = None
+        
+        # Tracking for TF backend
+        self.simple_tracker = SimpleTracker()
+        
+        # Hazard Stabilizer
+        self.stabilizer = None
+        
+        # Load Model
+        self.model = None
+        self.load_model(model_path)
+        
+    def download_weights_if_needed(self, model_path):
+        """Downloads standard YOLO weights if missing, using curl to avoid Python SSL issues."""
+        if os.path.exists(model_path):
+            return True
+            
+        # Only download standard YOLOv11 weights
+        if model_path not in ["yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"]:
+            return False
+            
+        print(f"Weights {model_path} not found. Downloading...")
+        url = f"https://github.com/ultralytics/assets/releases/download/v8.3.0/{model_path}"
+        
+        try:
+            import subprocess
+            # Use curl -L (follow redirects) -k (insecure/skip SSL check if needed, though usually system curl allows it)
+            # We'll try without -k first, but if user system has issues, -k might be needed. 
+            # Given the error was "unable to get local issuer certificate" in python, system curl usually has its own CA bundle or works better.
+            res = subprocess.run(["curl", "-L", "-o", model_path, url], check=True)
+            if res.returncode == 0 and os.path.exists(model_path):
+                print(f"Successfully downloaded {model_path}")
+                return True
+        except Exception as e:
+            print(f"Failed to download with curl: {e}")
+            
+        return False
+
+    def load_model(self, model_path):
+        """Loads a new model. Returns True if successful, False otherwise."""
+        print(f"Loading model: {model_path} on {self.device}...")
+        try:
+            # Ensure weights exist
+            self.download_weights_if_needed(model_path)
+            
+            # Default to Ultralytics
+            self.model = YOLO(model_path)
+            # Basic validation
+            if not self.model:
+                raise ValueError("Model failed to load.")
+                
+            return True, "Success"
+        except Exception as e:
+            print(f"Error loading model {model_path}: {e}")
+            return False, str(e)
     
     def speak_warning(self, text):
         """Spawns a thread to speak the warning (MacOS 'say')."""
@@ -61,65 +125,130 @@ class RREMMonitor:
         if not ret:
             return None, []
 
-        # Run inference with tracking
-        # Using ByteTrack as it generally handles lost/low-conf objects better than BoT-SORT
-        results = self.model.track(frame, persist=True, conf=self.conf_threshold, tracker="bytetrack.yaml", verbose=False)
+        # Filter classes based on model type
+        # COCO models have 80 classes. Our custom model has 11.
+        relevant_classes = None
+        if len(self.model.names) > 20:
+             # Standard COCO Model - Filter irrelevant stuff
+             # Person(0), Bike(1), Car(2), Motorcycle(3), Bus(5), Truck(7), Cat(15), Dog(16), Traffic Light(9), Stop Sign(11)
+             relevant_classes = [0, 1, 2, 3, 5, 7, 9, 11, 15, 16]
+        
+        results = self.model.track(frame, persist=True, conf=self.conf_threshold, tracker="bytetrack.yaml", verbose=False, device=self.device, classes=relevant_classes)
         result = results[0]
-
-        # Process detections
+        
+        # --- HAZARD STABILIZER LOGIC ---
+        h, w = frame.shape[:2]
+        if self.stabilizer is None or self.stabilizer.width != w or self.stabilizer.height != h:
+            self.stabilizer = HazardStabilizer(frame_width=w, frame_height=h)
+            
+        # Convert YOLO results to dict list for stabilizer
+        detections_dicts = []
+        current_frame_ids = []
+        
+        if result.boxes and result.boxes.id is not None:
+             track_ids = result.boxes.id.int().cpu().tolist()
+             boxes = result.boxes.xyxy.cpu().tolist()
+             clss = result.boxes.cls.int().cpu().tolist()
+             confs = result.boxes.conf.cpu().tolist()
+             
+             for i, tid in enumerate(track_ids):
+                 class_id = clss[i]
+                 conf = confs[i]
+                 
+                 # --- FALSE POSITIVE FIX ---
+                 # Accidents are rare. Require higher confidence to show them.
+                 # Filter out "Accident" (10) if confidence is too low (e.g. < 0.60)
+                 if class_id == 10 and conf < 0.60:
+                     continue
+                     
+                 current_frame_ids.append(tid)
+                 detections_dicts.append({
+                     'box': boxes[i],
+                     'id': tid,
+                     'class_id': class_id,
+                     'class_name': result.names[class_id],
+                     'conf': conf
+                 })
+        
+        # Update stabilizer
+        valid_hazards = self.stabilizer.update(detections_dicts, current_frame_ids)
+        
+        # Reconstruct BoxesShim for Analyzer
+        class BoxShim:
+            def __init__(self, data):
+                self.cls = torch.tensor([float(data['class_id'])])
+                self.id = torch.tensor([float(data['id'])])
+                self.xyxy = torch.tensor([data['box']])
+                self.conf = torch.tensor([data['conf']])
+        
+        shim_boxes_list = [BoxShim(d) for d in valid_hazards]
+        
+        class BoxesShim:
+            def __init__(self, obj_list):
+                self.obj_list = obj_list
+                if obj_list:
+                     self.id = torch.tensor([o.id for o in obj_list])
+                else:
+                     self.id = None
+            def __iter__(self):
+                return iter(self.obj_list)
+            def __len__(self):
+                return len(self.obj_list)
+        
+        boxes_shim = BoxesShim(shim_boxes_list)
+        
+        # Analyze using FILTERED boxes
         frame_shape = frame.shape
         lane_x1, lane_x2 = self.lane_tracker.update(frame)
-        current_alerts = self.analyzer.analyze(result.boxes, result.names, frame_shape, lane_bounds=(lane_x1, lane_x2))
+        current_alerts = self.analyzer.analyze(boxes_shim, result.names, frame_shape, lane_bounds=(lane_x1, lane_x2))
         
-        # PERSISTENCE & VOICE
+        # Annotation
+        annotated_frame = result.plot()
+        
+        # Draw Danger Zone
+        annotated_frame = self.stabilizer.draw_debug_zone(annotated_frame)
+
+        # 3. PERSISTENCE & VOICE LOGIC
         curr_time = time.time()
         
+        # Define display_msg safely
+        display_msg = ""
+        
         if current_alerts:
-            # New alerts found
-            # Join top alerts
-            msg = f"{', '.join(current_alerts[:1])}" # Just top 1 for clean display
+            # Update persistent message
+            msg = f"{', '.join(current_alerts[:1])}"
             self.current_display_message = msg
-            self.alert_display_until = curr_time + 3.0 # Display for 3 seconds
+            self.alert_display_until = curr_time + 3.0
             
-            # Voice Alert (with cooldown)
+            # Voice Alert
             if curr_time - self.last_speech_time > 4.0:
                 self.speak_warning(msg)
                 self.last_speech_time = curr_time
         
-        # Decide what to draw
-        display_msg = ""
+        # Check persistence
         if curr_time < self.alert_display_until:
              display_msg = self.current_display_message
-
-        # Draw Output
-        annotated_frame = result.plot()
         
+        # Draw and record
         if display_msg:
-            # We don't update all_detected_hazards here with persisted msg to avoid dupes in logs, 
-            # assuming current_alerts handles the logical detection recording.
+            # Update history
             if current_alerts:
                  self.all_detected_hazards.update(current_alerts)
-            
             draw_alert(annotated_frame, f"ALERT: {display_msg}")
 
-        # VISUALIZE LANE & DANGER ZONE
+        # 4. VISUALIZATION (Lane, FPS)
         h, w = frame.shape[:2]
-        x1 = lane_x1
-        x2 = lane_x2
-        # Draw translucent overlay or lines? Lines are cleaner for speed.
-        # Cyan lines
-        cv2.line(annotated_frame, (x1, 0), (x1, h), (255, 255, 0), 2)
-        cv2.line(annotated_frame, (x2, 0), (x2, h), (255, 255, 0), 2)
-        # Helper Text
-        cv2.putText(annotated_frame, "EGO LANE", ((x1+x2)//2 - 60, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        x1 = int(self.lane_tracker.avg_x1)
+        x2 = int(self.lane_tracker.avg_x2)
+        if x1 is not None and x2 is not None:
+             cv2.line(annotated_frame, (int(x1), 0), (int(x1), h), (255, 255, 0), 2)
+             cv2.line(annotated_frame, (int(x2), 0), (int(x2), h), (255, 255, 0), 2)
+             cv2.putText(annotated_frame, "EGO LANE", ((int(x1)+int(x2))//2 - 60, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-
-        # FPS
-        curr_time = time.time()
+        # FPS calculation
         fps = 1 / (curr_time - self.prev_time) if self.prev_time else 0
         self.prev_time = curr_time
-        
-        cv2.putText(annotated_frame, f"FPS: {fps:.1f}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(annotated_frame, f"FPS: {fps:.1f}", (annotated_frame.shape[1]-180, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         
         return annotated_frame, current_alerts
 

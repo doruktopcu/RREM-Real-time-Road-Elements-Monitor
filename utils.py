@@ -44,6 +44,8 @@ class LaneTracker:
         self.avg_x2 = 0
         self.initialized = False
         self.alpha = 0.2 # Exponential Moving Average factor (0.0 - 1.0)
+        self.frame_count = 0
+        self.skip_interval = 5 # Run detection every 5th frame
         
     def update(self, frame):
         """
@@ -52,6 +54,12 @@ class LaneTracker:
         """
         if frame is None: return None, None
         
+        self.frame_count += 1
+        
+        # Optimization: Return cached values if not on interval
+        if self.initialized and self.frame_count % self.skip_interval != 0:
+             return int(self.avg_x1), int(self.avg_x2)
+             
         h, w = frame.shape[:2]
         
         # Region of Interest: Bottom Half only
@@ -139,6 +147,207 @@ class LaneTracker:
         
         return int(self.avg_x1), int(self.avg_x2)
 
+class SimpleTracker:
+    def __init__(self, max_missed=5, iou_threshold=0.3):
+        self.next_id = 1
+        self.tracks = {} # {id: {'box': [x1,y1,x2,y2], 'missed': 0}}
+        self.max_missed = max_missed
+        self.iou_threshold = iou_threshold
+
+    def iou(self, boxA, boxB):
+        xA = max(boxA[0], boxB[0])
+        yA = max(boxA[1], boxB[1])
+        xB = min(boxA[2], boxB[2])
+        yB = min(boxA[3], boxB[3])
+        interArea = max(0, xB - xA) * max(0, yB - yA)
+        boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+        boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+        iou = interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+        return iou
+
+    def update(self, detected_boxes):
+        """
+        detected_boxes: list of [x1, y1, x2, y2]
+        Returns: list of {'id': int, 'box': [x1,y1,x2,y2]}
+        """
+        updated_tracks = []
+        
+        # Greedy Matching
+        # Create a matrix of IoUs? Or just iterate.
+        # For simplicity/speed without scipy:
+        
+        # 1. Prediction (assume static for simple version, or Kalman but that's complex)
+        # We will match existing tracks to new boxes.
+        
+        matched_track_ids = set()
+        matched_detection_indices = set()
+        
+        # Sort existing tracks? No.
+        
+        matches = [] # (track_id, det_idx, iou)
+        
+        for t_id, t_data in self.tracks.items():
+            t_box = t_data['box']
+            for d_idx, d_box in enumerate(detected_boxes):
+                 score = self.iou(t_box, d_box)
+                 if score > self.iou_threshold:
+                     matches.append((t_id, d_idx, score))
+                     
+        # Sort matches by score descending
+        matches.sort(key=lambda x: x[2], reverse=True)
+        
+        for t_id, d_idx, score in matches:
+            if t_id in matched_track_ids or d_idx in matched_detection_indices:
+                continue
+            
+            matched_track_ids.add(t_id)
+            matched_detection_indices.add(d_idx)
+            
+            # Update track
+            self.tracks[t_id]['box'] = detected_boxes[d_idx]
+            self.tracks[t_id]['missed'] = 0
+            updated_tracks.append({'id': t_id, 'box': detected_boxes[d_idx]})
+            
+        # Handle New Detections
+        for d_idx, d_box in enumerate(detected_boxes):
+            if d_idx not in matched_detection_indices:
+                # New Track
+                new_id = self.next_id
+                self.next_id += 1
+                self.tracks[new_id] = {'box': d_box, 'missed': 0}
+                updated_tracks.append({'id': new_id, 'box': d_box})
+                
+        # Handle Lost Tracks
+        to_remove = []
+        for t_id in self.tracks:
+            if t_id not in matched_track_ids:
+                self.tracks[t_id]['missed'] += 1
+                if self.tracks[t_id]['missed'] > self.max_missed:
+                    to_remove.append(t_id)
+        
+        for t_id in to_remove:
+            del self.tracks[t_id]
+            
+        return updated_tracks
+
+class HazardStabilizer:
+    def __init__(self, frame_width=1920, frame_height=1080, buffer_frames=5):
+        """
+        Args:
+            frame_width (int): Video width (e.g., 1920 for 1080p)
+            frame_height (int): Video height (e.g., 1080 for 1080p)
+            buffer_frames (int): Number of consecutive frames a hazard must be seen to trigger alert.
+        """
+        self.width = frame_width
+        self.height = frame_height
+        self.buffer_frames = buffer_frames
+        
+        # Track potential hazards: {track_id: consecutive_count}
+        self.hazard_counter = {} 
+        
+        # --- DEFINE THE DANGER ZONE (Trapezoid) ---
+        # Normalized coordinates (0.0 to 1.0)
+        p1 = (0.20, 1.0)  # Bottom Left
+        p2 = (0.35, 0.45) # Top Left
+        p3 = (0.65, 0.45) # Top Right
+        p4 = (0.80, 1.0)  # Bottom Right
+
+        # Convert to pixels
+        roi_points = np.array([
+            [int(p1[0]*self.width), int(p1[1]*self.height)],
+            [int(p2[0]*self.width), int(p2[1]*self.height)],
+            [int(p3[0]*self.width), int(p3[1]*self.height)],
+            [int(p4[0]*self.width), int(p4[1]*self.height)]
+        ], dtype=np.int32)
+        
+        self.roi_poly = roi_points
+
+    def is_in_danger_zone(self, box):
+        """
+        Checks if the center of the bounding box is inside the driving lane.
+        box format: [x1, y1, x2, y2]
+        """
+        x1, y1, x2, y2 = box
+        center_x = int((x1 + x2) / 2)
+        center_y = int(y2) # Use the bottom-center point
+        
+        # cv2.pointPolygonTest returns positive if inside, negative if outside
+        result = cv2.pointPolygonTest(self.roi_poly, (center_x, center_y), False)
+        return result >= 0
+
+    def update(self, detections, current_frame_detected_ids):
+        """
+        Filter detections and update persistence counters.
+        """
+        valid_hazards = []
+        
+        # 1. Decay missing hazards
+        track_ids_to_remove = []
+        for tid in self.hazard_counter:
+            if tid not in current_frame_detected_ids:
+                self.hazard_counter[tid] -= 1 # Decay
+                if self.hazard_counter[tid] <= 0:
+                    track_ids_to_remove.append(tid)
+        
+        for tid in track_ids_to_remove:
+            del self.hazard_counter[tid]
+
+        # 2. Process new detections
+        for det in detections:
+            track_id = det.get('id', -1)
+            
+            # --- FILTER 1: SPATIAL ---
+            if not self.is_in_danger_zone(det['box']):
+                continue 
+
+            # --- FILTER 2: LOGICAL OVERLAP (Person vs Accident) ---
+            # If we detect an "Accident" (10) but it overlaps significantly with a "Person" (0),
+            # it is likely a misclassified person. Trust "Person" more.
+            if det['class_id'] == 10: # Accident
+                frame_has_person = False
+                accident_box = det['box']
+                
+                # Check against other detections in this frame
+                for other in detections:
+                    if other['class_id'] == 0: # Person
+                         # Simple Intersection check
+                         p_box = other['box']
+                         
+                         # Check if boxes overlap significantly
+                         xA = max(accident_box[0], p_box[0])
+                         yA = max(accident_box[1], p_box[1])
+                         xB = min(accident_box[2], p_box[2])
+                         yB = min(accident_box[3], p_box[3])
+                         
+                         if xB > xA and yB > yA:
+                             # They overlap! Assume it's a person standing near a car or misclassified.
+                             # In reality, we might calculate IoU, but ANY overlap with Person is suspicious for an "Accident" box
+                             # unless the person is part of the accident. 
+                             # But usually model gets confused by person's shape.
+                             # Let's filter it out to be safe.
+                             frame_has_person = True
+                             break
+                
+                if frame_has_person:
+                    continue
+
+            # --- FILTER 3: TEMPORAL ---
+            if track_id != -1:
+                self.hazard_counter[track_id] = self.hazard_counter.get(track_id, 0) + 1
+                
+                # Only return as a valid hazard if it has been seen for N frames
+                if self.hazard_counter[track_id] >= self.buffer_frames:
+                    valid_hazards.append(det)
+            else:
+                valid_hazards.append(det)
+
+        return valid_hazards
+
+    def draw_debug_zone(self, frame):
+        """Draws the danger zone on the frame for debugging."""
+        cv2.polylines(frame, [self.roi_poly], isClosed=True, color=(0, 255, 0), thickness=2)
+        return frame
+
 class HazardAnalyzer:
     def __init__(self):
         # Store history: {track_id: {'area': [float], 'center': [(x,y)], 'last_seen': timestamp}}
@@ -210,7 +419,11 @@ class HazardAnalyzer:
 
             # Refactored Loop Logic:
             # 1. Update History
-            if track_id != -1 and cls_id in VEHICLE_CLASSES + BIKER_CLASSES + HAZARD_CLASSES: # Track everything relevant
+            # Track known classes OR large unknown objects
+            is_known = cls_id in VEHICLE_CLASSES + BIKER_CLASSES + HAZARD_CLASSES
+            should_track = is_known or (area > 3000)
+
+            if track_id != -1 and should_track:
                 current_ids.append(track_id)
                 if track_id not in self.track_history:
                     self.track_history[track_id] = {'area': [], 'center': []}
@@ -268,19 +481,34 @@ class HazardAnalyzer:
             elif cls_id in VEHICLE_CLASSES:
                  if is_approaching:
                      alerts.append(f"VEHICLE MERGING: {name}")
+
+            # GENERIC OBSTACLE (SAM / Unknown)
+            elif (cls_id not in VEHICLE_CLASSES and 
+                  cls_id not in BIKER_CLASSES and 
+                  cls_id not in HAZARD_CLASSES):
+                  if area > 3000:
+                      if in_lane:
+                          alerts.append(f"OBSTACLE AHEAD")
+                      elif is_approaching:
+                          alerts.append(f"OBSTACLE MERGING")
             
             # 3. Fast Approach (Only if in lane)
-            if in_lane and track_id != -1:
+            # Apply to ALL tracked objects (Vehicles + Generic Obstacles)
+            is_valid_target = (cls_id in VEHICLE_CLASSES) or (area > 3000 and cls_id not in BIKER_CLASSES + HAZARD_CLASSES)
+            
+            if in_lane and track_id != -1 and is_valid_target:
                  # Logic ... (use existing history)
                  history = self.track_history.get(track_id)
                  if history and len(history['area']) >= 4:
                     prev_area = history['area'][-4]
                     if prev_area > 0:
                         growth = (area - prev_area) / prev_area
+                        disp_name = name if (cls_id in VEHICLE_CLASSES) else "OBSTACLE"
+                        
                         if growth > 0.30 and area > 1500:
-                             alerts.append(f"CRASH IMMINENT (<1s): {name}")
+                             alerts.append(f"CRASH IMMINENT (<1s): {disp_name}")
                         elif growth > 0.10 and area > 1500:
-                             alerts.append(f"CRASH WARNING (<2s): {name}")
+                             alerts.append(f"CRASH WARNING (<2s): {disp_name}")
 
             # 4. Side Traffic (Refined)
             # Only if NOT in lane (obviously) and is very wide/close
