@@ -4,33 +4,36 @@ import cv2
 # We can use the model's names dict, but having some constants here helps.
 
 # Vulnerable Road Users and Animal Hazards
+# Vulnerable Road Users and Animal Hazards
+# Updated for UNIFIED DATASET (Custom Model)
+# Must match data.yaml: 0:Person, 1:Bicycle, 3:Motorcycle, 6:Cat, 7:Dog, 10:Accident
 HAZARD_CLASSES = [
-    0,  # person
-    1,  # bicycle
-    3,  # motorcycle
-    14, # bird
-    15, # cat
-    16, # dog
-    17, # horse
-    18, # sheep
-    19, # cow
-    20, # elephant
-    21, # bear
-    22, # zebra
-    23, # giraffe
+    0,  # Person
+    1,  # Bicycle
+    3,  # Motorcycle
+    6,  # Cat (Mapped from COCO #15)
+    7,  # Dog (Mapped from COCO #16)
+    10, # Accident
 ]
 
 # Vehicle Classes
+# 2: Car, 3: Motorcycle, 4: Bus, 5: Truck
 VEHICLE_CLASSES = [
-    2,  # car
-    3,  # motorcycle
-    5,  # bus
-    7,  # truck
+    2,  # Car
+    3,  # Motorcycle
+    4,  # Bus
+    5,  # Truck
 ]
 
 BIKER_CLASSES = [
-    1, # bicycle
-    3 # motorcycle
+    1, # Bicycle
+    3 # Motorcycle
+]
+
+# Traffic Control
+TRAFFIC_CLASSES = [
+    9,  # Traffic Light
+    11, # Stop Sign
 ]
 
 import numpy as np
@@ -247,10 +250,12 @@ class HazardStabilizer:
         
         # --- DEFINE THE DANGER ZONE (Trapezoid) ---
         # Normalized coordinates (0.0 to 1.0)
-        p1 = (0.20, 1.0)  # Bottom Left
-        p2 = (0.35, 0.45) # Top Left
-        p3 = (0.65, 0.45) # Top Right
-        p4 = (0.80, 1.0)  # Bottom Right
+        # User specified "Red Line" - refined V3
+        # Even lower top edge (0.70), narrower top width (0.27)
+        p1 = (0.0, 1.0)    # Bottom Left
+        p2 = (0.365, 0.70) # Top Left
+        p3 = (0.635, 0.70) # Top Right
+        p4 = (1.0, 1.0)    # Bottom Right
 
         # Convert to pixels
         roi_points = np.array([
@@ -262,20 +267,30 @@ class HazardStabilizer:
         
         self.roi_poly = roi_points
 
-    def is_in_danger_zone(self, box):
+    def is_in_danger_zone(self, box, mask=None):
         """
-        Checks if the center of the bounding box is inside the driving lane.
+        Checks if the center of the bounding box is inside the driving lane (mask).
+        If mask is None (e.g. not yet generated), returns False (or could default to True/Old Logic).
         box format: [x1, y1, x2, y2]
         """
         x1, y1, x2, y2 = box
         center_x = int((x1 + x2) / 2)
         center_y = int(y2) # Use the bottom-center point
         
-        # cv2.pointPolygonTest returns positive if inside, negative if outside
-        result = cv2.pointPolygonTest(self.roi_poly, (center_x, center_y), False)
-        return result >= 0
+        if mask is None:
+            # Fallback: strict safety or maintain old trapezoid if really needed. 
+            # For now, safer to assume NOT in danger if we don't know the road.
+            return False
+            
+        # Check image bounds
+        h, w = mask.shape
+        if 0 <= center_x < w and 0 <= center_y < h:
+            # Mask value should be 1 (True) for road
+            return mask[center_y, center_x] > 0
+            
+        return False
 
-    def update(self, detections, current_frame_detected_ids):
+    def update(self, detections, current_frame_detected_ids, mask=None):
         """
         Filter detections and update persistence counters.
         """
@@ -300,10 +315,34 @@ class HazardStabilizer:
             if not self.is_in_danger_zone(det['box']):
                 continue 
 
-            # --- FILTER 2: LOGICAL OVERLAP (Person vs Accident) ---
-            # If we detect an "Accident" (10) but it overlaps significantly with a "Person" (0),
-            # it is likely a misclassified person. Trust "Person" more.
-            if det['class_id'] == 10: # Accident
+            # --- FILTER 2: LOGICAL CORRECTIONS ---
+            
+            # A) GEOMETRIC CORRECTION (Accident -> Person)
+            # If the model detects "Accident" (10) but the box is taller than it is wide (like a person),
+            # it is almost certainly a misclassified person.
+            # Aspect Ratio = Height / Width
+            w = det['box'][2] - det['box'][0]
+            h = det['box'][3] - det['box'][1]
+            aspect_ratio = h / w if w > 0 else 0
+            
+            # Use stricter threshold: if tall (> 1.2 ratio), likely a person/pole, NOT a car crash.
+            if det['class_id'] == 10 and aspect_ratio > 1.2:
+                # Force change to Person (0)
+                det['class_id'] = 0
+                det['class_name'] = 'Person'
+            
+            # C) SIZE FILTER (Accidents must be significant)
+            # A car accident involves vehicles. Small boxes are likely noise/animals/people.
+            box_area = w * h
+            frame_area = self.width * self.height
+            if det['class_id'] == 10 and (box_area / frame_area) < 0.015: 
+                # Less than 1.5% of screen -> Ignore
+                continue
+
+            # B) OVERLAP SUPPRESSION (Person > Accident)
+            # If we detect an "Accident" (10) (and it wasn't fixed above) but it overlaps 
+            # significantly with a "Person" (0), ignore the accident.
+            if det['class_id'] == 10: 
                 frame_has_person = False
                 accident_box = det['box']
                 
@@ -312,19 +351,12 @@ class HazardStabilizer:
                     if other['class_id'] == 0: # Person
                          # Simple Intersection check
                          p_box = other['box']
-                         
-                         # Check if boxes overlap significantly
                          xA = max(accident_box[0], p_box[0])
                          yA = max(accident_box[1], p_box[1])
                          xB = min(accident_box[2], p_box[2])
                          yB = min(accident_box[3], p_box[3])
                          
                          if xB > xA and yB > yA:
-                             # They overlap! Assume it's a person standing near a car or misclassified.
-                             # In reality, we might calculate IoU, but ANY overlap with Person is suspicious for an "Accident" box
-                             # unless the person is part of the accident. 
-                             # But usually model gets confused by person's shape.
-                             # Let's filter it out to be safe.
                              frame_has_person = True
                              break
                 
@@ -343,9 +375,13 @@ class HazardStabilizer:
 
         return valid_hazards
 
-    def draw_debug_zone(self, frame):
-        """Draws the danger zone on the frame for debugging."""
-        cv2.polylines(frame, [self.roi_poly], isClosed=True, color=(0, 255, 0), thickness=2)
+    def draw_debug_zone(self, frame, mask=None):
+        """Draws the danger zone (mask) on the frame for debugging."""
+        if mask is not None:
+             # Create a green overlay
+             color_mask = np.zeros_like(frame)
+             color_mask[mask > 0] = [0, 255, 0] # Green
+             frame = cv2.addWeighted(frame, 1.0, color_mask, 0.3, 0)
         return frame
 
 class HazardAnalyzer:
@@ -482,10 +518,19 @@ class HazardAnalyzer:
                  if is_approaching:
                      alerts.append(f"VEHICLE MERGING: {name}")
 
+            # TRAFFIC SIGNS & LIGHTS
+            elif cls_id in TRAFFIC_CLASSES:
+                if in_lane:
+                    if cls_id == 11:
+                         alerts.append(f"STOP SIGN AHEAD")
+                    elif cls_id == 9:
+                         alerts.append(f"TRAFFIC LIGHT AHEAD")
+            
             # GENERIC OBSTACLE (SAM / Unknown)
             elif (cls_id not in VEHICLE_CLASSES and 
                   cls_id not in BIKER_CLASSES and 
-                  cls_id not in HAZARD_CLASSES):
+                  cls_id not in HAZARD_CLASSES and
+                  cls_id not in TRAFFIC_CLASSES):
                   if area > 3000:
                       if in_lane:
                           alerts.append(f"OBSTACLE AHEAD")
@@ -588,3 +633,75 @@ def get_hazard_level(class_id):
     if class_id in HAZARD_CLASSES:
         return "HAZARD", (0, 0, 255) # Red
     return "NORMAL", (0, 255, 0) # Green
+
+class DistanceMonitor:
+    def __init__(self, frame_width=1920, focal_length_px=1000):
+        """
+        Estimates distance to vehicles and warns if too close.
+        Assumes standard dashcam FOV.
+        """
+        self.focal_length = focal_length_px
+        self.frame_width = frame_width
+        
+        # Real world widths (approx meters)
+        self.real_widths = {
+            2: 1.8,  # Car
+            4: 2.5,  # Bus
+            5: 2.5,  # Truck
+            3: 0.8,  # Motorcycle
+            1: 0.6,  # Bike
+            0: 0.5   # Person
+        }
+        
+        self.critical_distance = 15.0 # meters (Warning threshold)
+        self.tailgating_distance = 8.0 # meters (Danger threshold - typical stopping dist at city speed)
+
+    def estimate_distance(self, box, class_id):
+        """
+        Distance = (Real Width * Focal Length) / Image Width
+        """
+        x1, y1, x2, y2 = box
+        img_w = x2 - x1
+        if img_w <= 0: return 999.0
+        
+        real_w = self.real_widths.get(class_id, 1.5) # Default 1.5m
+        
+        distance = (real_w * self.focal_length) / img_w
+        return distance
+
+    def check_safe_distance(self, detections):
+        """
+        Analyzes detections to find the 'Leading Vehicle' (center lane, closest).
+        Returns: (status_message, color_code, distance, box)
+        """
+        # Find car in center lane
+        center_x = self.frame_width // 2
+        lane_center_threshold = self.frame_width * 0.3 # Must be within center 30%
+        
+        closest_dist = 999.0
+        closest_obj = None
+        
+        for det in detections:
+            # Check only vehicles
+            if det['class_id'] not in [2, 3, 4, 5]: # Car, Moto, Bus, Truck
+                continue
+                
+            x1, y1, x2, y2 = det['box']
+            obj_center = (x1 + x2) / 2
+            
+            # Is it in front of us? (Center of screen)
+            if abs(obj_center - center_x) < lane_center_threshold:
+                dist = self.estimate_distance(det['box'], det['class_id'])
+                if dist < closest_dist:
+                    closest_dist = dist
+                    closest_obj = det
+                    
+        if closest_obj:
+            if closest_dist < self.tailgating_distance:
+                return "CRITICAL: BRAKE!", (0, 0, 255), closest_dist, closest_obj['box']
+            elif closest_dist < self.critical_distance:
+                return "WARNING: Too Close", (0, 165, 255), closest_dist, closest_obj['box']
+            else:
+                return f"Distance: {closest_dist:.1f}m", (0, 255, 0), closest_dist, closest_obj['box']
+        
+        return None, (0, 255, 0), None, None

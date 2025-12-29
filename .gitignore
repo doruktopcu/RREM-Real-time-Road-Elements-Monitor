@@ -7,10 +7,32 @@ CMP-722 Project Proposal - Doruk Topcu.pdf
 *.png
 *.txt
 *.csv
-*.yaml
-*.yml
 *.DS_Store
 *.cache
 *.cpython-312.pyc
 *.zip
 *.pt
+*.mk
+*.bat
+*.jar
+*.h
+*.cmake
+*.pbxproj
+*.m4
+
+# Datasets & Models
+dataset/
+runs/
+yolo11n_saved_model/
+*.onnx
+*.npy
+
+# Build Artifacts
+.buildozer/
+bin/
+__pycache__/
+
+*.spec
+*.tflite
+__pycache__/utils.cpython-312.pyc
+__pycache__/rrem_monitor.cpython-312.pyc

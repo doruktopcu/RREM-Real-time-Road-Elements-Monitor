@@ -1,3 +1,7 @@
+import os
+# Enable MPS fallback for SAM2
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
 import tkinter as tk
 from tkinter import filedialog, ttk
 from PIL import Image, ImageTk

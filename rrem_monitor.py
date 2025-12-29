@@ -1,3 +1,7 @@
+import os
+# Enable MPS fallback for SAM2
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
 import argparse
 import time
 import torch
@@ -5,7 +9,7 @@ import cv2
 import os
 import threading
 from ultralytics import YOLO
-from utils import HazardAnalyzer, draw_alert, LaneTracker, SimpleTracker, HazardStabilizer
+from utils import HazardAnalyzer, draw_alert, LaneTracker, SimpleTracker, HazardStabilizer, DistanceMonitor
 
 
 
@@ -21,8 +25,6 @@ class RREMMonitor:
             print("Using CUDA acceleration!")
             
         self.conf_threshold = conf_threshold
-        self.analyzer = HazardAnalyzer()
-        self.lane_tracker = LaneTracker()
         self.all_detected_hazards = set()
         self.prev_time = 0
         
@@ -35,11 +37,19 @@ class RREMMonitor:
         self.cap = None
         self.source = None
         
-        # Tracking for TF backend
-        self.simple_tracker = SimpleTracker()
+        # Trackers and Analyzers
+        self.lane_tracker = LaneTracker()
+        self.tracker = SimpleTracker(max_missed=10)
+        self.stabilizer = HazardStabilizer(buffer_frames=3) # Reduce buffer for faster response
+        self.analyzer = HazardAnalyzer()
+        self.distance_monitor = DistanceMonitor()
         
-        # Hazard Stabilizer
-        self.stabilizer = None
+        # Segmenter
+        # self.segmenter = RoadSegmenter()
+        # self.cached_road_mask = None
+        # self.segmentation_interval = 30 # Run every 30 frames standard, or dynamic
+        # self.frame_count = 0
+
         
         # Load Model
         self.model = None
@@ -136,10 +146,16 @@ class RREMMonitor:
         results = self.model.track(frame, persist=True, conf=self.conf_threshold, tracker="bytetrack.yaml", verbose=False, device=self.device, classes=relevant_classes)
         result = results[0]
         
+        # Debug: Print classes if using custom model
+        if relevant_classes is None:
+            # print(f"Classes: {result.names}") # Debugging
+            pass
+
         # --- HAZARD STABILIZER LOGIC ---
         h, w = frame.shape[:2]
         if self.stabilizer is None or self.stabilizer.width != w or self.stabilizer.height != h:
             self.stabilizer = HazardStabilizer(frame_width=w, frame_height=h)
+            self.distance_monitor = DistanceMonitor(frame_width=w)
             
         # Convert YOLO results to dict list for stabilizer
         detections_dicts = []
@@ -173,6 +189,8 @@ class RREMMonitor:
         # Update stabilizer
         valid_hazards = self.stabilizer.update(detections_dicts, current_frame_ids)
         
+
+        
         # Reconstruct BoxesShim for Analyzer
         class BoxShim:
             def __init__(self, data):
@@ -199,11 +217,54 @@ class RREMMonitor:
         
         # Analyze using FILTERED boxes
         frame_shape = frame.shape
-        lane_x1, lane_x2 = self.lane_tracker.update(frame)
-        current_alerts = self.analyzer.analyze(boxes_shim, result.names, frame_shape, lane_bounds=(lane_x1, lane_x2))
+        # lane_x1, lane_x2 = self.lane_tracker.update(frame) # Removed
         
-        # Annotation
+        # Since we pre-filter with HazardStabilizer (Red Zone), 
+        # everything passed to Analyzer is "In Lane" roughly.
+        # We pass full width as bounds so Analyzer considers them valid targets.
+        current_alerts = self.analyzer.analyze(boxes_shim, result.names, frame_shape, lane_bounds=(0, w))
+        
+        # 3. Road Segmentation (SAM2) - REVERTED to Static
+        # User requested to disable SAM2 due to performance/accuracy issues.
+        # Keeping placeholders if needed later, but effectively disabled.
+        
+        road_mask = None
+        
+        # 4. Filter Hazards
+        # Pass the mask to existing hazard stabilizer logic to ignore parked cars
+        valid_hazards = self.stabilizer.update(detections_dicts, current_frame_ids)
+        
+        # 5. Distance Estimation & Safety Check
+        safe_msg, safe_color, leading_dist, leading_box = self.distance_monitor.check_safe_distance(valid_hazards)
+        
+        # 6. Visualization
+        # Draw Lane/Road (Segmentation Mask) - Green Overlay
         annotated_frame = result.plot()
+        annotated_frame = self.stabilizer.draw_debug_zone(annotated_frame)
+        
+        # --- DISTANCE MONITOR ---
+        dist_msg, dist_color, dist_val, dist_box = safe_msg, safe_color, leading_dist, leading_box
+        if dist_msg:
+             # Draw distance warning
+
+            # Use a slightly lower position for distance alert so it doesn't overlap with main alert
+            # But draw_alert centers at top. Let's make a custom draw here or modify draw_alert.
+            # For now, just use draw_alert but maybe simpler.
+            
+            # Custom draw for Distance
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            # Draw top-right
+            cv2.putText(annotated_frame, dist_msg, (w - 350, 50), font, 1.0, dist_color, 2)
+            
+            if dist_box:
+                # Highlight the leading car
+                cv2.rectangle(annotated_frame, (int(dist_box[0]), int(dist_box[1])), (int(dist_box[2]), int(dist_box[3])), dist_color, 4)
+                
+            # Voice Alert for critical
+            current_time = time.time()
+            if "CRITICAL" in dist_msg and (current_time - self.last_speech_time > 3.0):
+                self.speak_warning("Brake!")
+                self.last_speech_time = current_time
         
         # Draw Danger Zone
         annotated_frame = self.stabilizer.draw_debug_zone(annotated_frame)
@@ -238,12 +299,12 @@ class RREMMonitor:
 
         # 4. VISUALIZATION (Lane, FPS)
         h, w = frame.shape[:2]
-        x1 = int(self.lane_tracker.avg_x1)
-        x2 = int(self.lane_tracker.avg_x2)
-        if x1 is not None and x2 is not None:
-             cv2.line(annotated_frame, (int(x1), 0), (int(x1), h), (255, 255, 0), 2)
-             cv2.line(annotated_frame, (int(x2), 0), (int(x2), h), (255, 255, 0), 2)
-             cv2.putText(annotated_frame, "EGO LANE", ((int(x1)+int(x2))//2 - 60, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        # x1 = int(self.lane_tracker.avg_x1)
+        # x2 = int(self.lane_tracker.avg_x2)
+        # if x1 is not None and x2 is not None:
+        #      cv2.line(annotated_frame, (int(x1), 0), (int(x1), h), (255, 255, 0), 2)
+        #      cv2.line(annotated_frame, (int(x2), 0), (int(x2), h), (255, 255, 0), 2)
+        #      cv2.putText(annotated_frame, "EGO LANE", ((int(x1)+int(x2))//2 - 60, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
         # FPS calculation
         fps = 1 / (curr_time - self.prev_time) if self.prev_time else 0

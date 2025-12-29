@@ -75,7 +75,9 @@ def extract_frames_from_folder(input_folder, output_folder, interval_seconds=3.0
                 save_name = f"{os.path.splitext(filename)[0]}_f{frame_count:06d}.jpg"
                 save_path = os.path.join(output_folder, save_name)
                 
-                cv2.imwrite(save_path, frame)
+                # Resize to standard YOLO size (640x360) for efficiency
+                frame_resized = cv2.resize(frame, (640, 360))
+                cv2.imwrite(save_path, frame_resized)
                 saved_count += 1
                 total_images_saved += 1
                 
