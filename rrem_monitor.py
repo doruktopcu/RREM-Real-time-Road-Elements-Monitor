@@ -1,6 +1,6 @@
 import os
 # Enable MPS fallback for SAM2
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
 
 import argparse
 import time
@@ -44,11 +44,7 @@ class RREMMonitor:
         self.analyzer = HazardAnalyzer()
         self.distance_monitor = DistanceMonitor()
         
-        # Segmenter
-        # self.segmenter = RoadSegmenter()
-        # self.cached_road_mask = None
-        # self.segmentation_interval = 30 # Run every 30 frames standard, or dynamic
-        # self.frame_count = 0
+
 
         
         # Load Model
@@ -173,8 +169,8 @@ class RREMMonitor:
                  
                  # --- FALSE POSITIVE FIX ---
                  # Accidents are rare. Require higher confidence to show them.
-                 # Filter out "Accident" (10) if confidence is too low (e.g. < 0.60)
-                 if class_id == 10 and conf < 0.60:
+                 # Updated: Lowered to 0.40 to ensure we catch them in varied conditions
+                 if class_id == 10 and conf < 0.40:
                      continue
                      
                  current_frame_ids.append(tid)
@@ -224,11 +220,7 @@ class RREMMonitor:
         # We pass full width as bounds so Analyzer considers them valid targets.
         current_alerts = self.analyzer.analyze(boxes_shim, result.names, frame_shape, lane_bounds=(0, w))
         
-        # 3. Road Segmentation (SAM2) - REVERTED to Static
-        # User requested to disable SAM2 due to performance/accuracy issues.
-        # Keeping placeholders if needed later, but effectively disabled.
-        
-        road_mask = None
+
         
         # 4. Filter Hazards
         # Pass the mask to existing hazard stabilizer logic to ignore parked cars

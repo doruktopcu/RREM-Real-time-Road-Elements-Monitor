@@ -1,6 +1,6 @@
 import os
 # Enable MPS fallback for SAM2
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
 
 import tkinter as tk
 from tkinter import filedialog, ttk
@@ -68,6 +68,7 @@ class RREMGUI:
         self.model_map = {
             "YOLOv11 Nano": "yolo11n.pt",
             "YOLOv11 Small": "yolo11s.pt",
+            "YOLOv11 Medium": "yolo11m.pt",
             "Custom RREM Model": "best.pt"
         }
         

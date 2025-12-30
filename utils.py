@@ -250,12 +250,11 @@ class HazardStabilizer:
         
         # --- DEFINE THE DANGER ZONE (Trapezoid) ---
         # Normalized coordinates (0.0 to 1.0)
-        # User specified "Red Line" - refined V3
-        # Even lower top edge (0.70), narrower top width (0.27)
-        p1 = (0.0, 1.0)    # Bottom Left
-        p2 = (0.365, 0.70) # Top Left
-        p3 = (0.635, 0.70) # Top Right
-        p4 = (1.0, 1.0)    # Bottom Right
+        # Wider and Deeper Coverage for Dashcam
+        p1 = (0.0, 1.0)     # Bottom Left
+        p2 = (0.25, 0.55)   # Top Left (Wider top, deeper)
+        p3 = (0.75, 0.55)   # Top Right (Wider top, deeper)
+        p4 = (1.0, 1.0)     # Bottom Right
 
         # Convert to pixels
         roi_points = np.array([
@@ -267,30 +266,22 @@ class HazardStabilizer:
         
         self.roi_poly = roi_points
 
-    def is_in_danger_zone(self, box, mask=None):
+    def is_in_danger_zone(self, box):
         """
-        Checks if the center of the bounding box is inside the driving lane (mask).
-        If mask is None (e.g. not yet generated), returns False (or could default to True/Old Logic).
+        Checks if the center of the bounding box is inside the driving lane.
+        Uses static polygon.
         box format: [x1, y1, x2, y2]
         """
         x1, y1, x2, y2 = box
         center_x = int((x1 + x2) / 2)
         center_y = int(y2) # Use the bottom-center point
         
-        if mask is None:
-            # Fallback: strict safety or maintain old trapezoid if really needed. 
-            # For now, safer to assume NOT in danger if we don't know the road.
-            return False
-            
-        # Check image bounds
-        h, w = mask.shape
-        if 0 <= center_x < w and 0 <= center_y < h:
-            # Mask value should be 1 (True) for road
-            return mask[center_y, center_x] > 0
-            
-        return False
+        # Fallback: Static Polygon
+        # cv2.pointPolygonTest returns positive if inside, negative if outside
+        result = cv2.pointPolygonTest(self.roi_poly, (center_x, center_y), False)
+        return result >= 0
 
-    def update(self, detections, current_frame_detected_ids, mask=None):
+    def update(self, detections, current_frame_detected_ids):
         """
         Filter detections and update persistence counters.
         """
@@ -317,28 +308,9 @@ class HazardStabilizer:
 
             # --- FILTER 2: LOGICAL CORRECTIONS ---
             
-            # A) GEOMETRIC CORRECTION (Accident -> Person)
-            # If the model detects "Accident" (10) but the box is taller than it is wide (like a person),
-            # it is almost certainly a misclassified person.
-            # Aspect Ratio = Height / Width
-            w = det['box'][2] - det['box'][0]
-            h = det['box'][3] - det['box'][1]
-            aspect_ratio = h / w if w > 0 else 0
+            # REMOVED: Geometric/Size filters that were suppressing accidents
+            # We trust the custom model + new confidence thresholds
             
-            # Use stricter threshold: if tall (> 1.2 ratio), likely a person/pole, NOT a car crash.
-            if det['class_id'] == 10 and aspect_ratio > 1.2:
-                # Force change to Person (0)
-                det['class_id'] = 0
-                det['class_name'] = 'Person'
-            
-            # C) SIZE FILTER (Accidents must be significant)
-            # A car accident involves vehicles. Small boxes are likely noise/animals/people.
-            box_area = w * h
-            frame_area = self.width * self.height
-            if det['class_id'] == 10 and (box_area / frame_area) < 0.015: 
-                # Less than 1.5% of screen -> Ignore
-                continue
-
             # B) OVERLAP SUPPRESSION (Person > Accident)
             # If we detect an "Accident" (10) (and it wasn't fixed above) but it overlaps 
             # significantly with a "Person" (0), ignore the accident.
@@ -375,13 +347,11 @@ class HazardStabilizer:
 
         return valid_hazards
 
-    def draw_debug_zone(self, frame, mask=None):
-        """Draws the danger zone (mask) on the frame for debugging."""
-        if mask is not None:
-             # Create a green overlay
-             color_mask = np.zeros_like(frame)
-             color_mask[mask > 0] = [0, 255, 0] # Green
-             frame = cv2.addWeighted(frame, 1.0, color_mask, 0.3, 0)
+    def draw_debug_zone(self, frame):
+        """Draws the danger zone on the frame for debugging."""
+        # Static polygon is drawn by rrem_monitor usually? Or we can draw it here if needed.
+        # Actually rrem_monitor called this. Let's keep it but just draw poly.
+        cv2.polylines(frame, [self.roi_poly], isClosed=True, color=(0, 255, 255), thickness=2)
         return frame
 
 class HazardAnalyzer:
