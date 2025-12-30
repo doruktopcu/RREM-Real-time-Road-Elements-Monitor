@@ -14,7 +14,7 @@ from utils import HazardAnalyzer, draw_alert, LaneTracker, SimpleTracker, Hazard
 
 
 class RREMMonitor:
-    def __init__(self, model_path="yolo11n.pt", conf_threshold=0.25):
+    def __init__(self, model_path="yolo11n.pt", conf_threshold=0.40):
         # Hardware Acceleration Check
         self.device = 'cpu'
         if torch.backends.mps.is_available():
@@ -40,7 +40,7 @@ class RREMMonitor:
         # Trackers and Analyzers
         self.lane_tracker = LaneTracker()
         self.tracker = SimpleTracker(max_missed=10)
-        self.stabilizer = HazardStabilizer(buffer_frames=3) # Reduce buffer for faster response
+        self.stabilizer = HazardStabilizer(buffer_frames=5) # Increased buffer for stability
         self.analyzer = HazardAnalyzer()
         self.distance_monitor = DistanceMonitor()
         
@@ -169,8 +169,8 @@ class RREMMonitor:
                  
                  # --- FALSE POSITIVE FIX ---
                  # Accidents are rare. Require higher confidence to show them.
-                 # Updated: Lowered to 0.40 to ensure we catch them in varied conditions
-                 if class_id == 10 and conf < 0.40:
+                 # Updated: Increased to 0.50 due to higher base confidence
+                 if class_id == 10 and conf < 0.50:
                      continue
                      
                  current_frame_ids.append(tid)
@@ -194,6 +194,7 @@ class RREMMonitor:
                 self.id = torch.tensor([float(data['id'])])
                 self.xyxy = torch.tensor([data['box']])
                 self.conf = torch.tensor([data['conf']])
+                self.zone = data.get('zone', 0) # Zone level (1=Green, 2=Yellow, 3=Red)
         
         shim_boxes_list = [BoxShim(d) for d in valid_hazards]
         

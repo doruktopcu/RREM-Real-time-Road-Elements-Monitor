@@ -1,19 +1,22 @@
 import cv2
-from rrem_monitor import RREMMonitor
+from utils import HazardStabilizer
 
 def verify_zone():
-    monitor = RREMMonitor(model_path="yolo11n.pt")
-    monitor.start_capture("input_video.mp4")
+    image_path = "dataset/raw_frames/NO20251028-132358-000067F_f000180.jpg"
+    frame = cv2.imread(image_path)
     
-    # Seek to a frame with a road (e.g., 200)
-    monitor.seek_frame(200)
+    if frame is None:
+        print(f"Error: Could not load {image_path}")
+        return
+
+    h, w = frame.shape[:2]
+    stabilizer = HazardStabilizer(frame_width=w, frame_height=h)
     
-    frame, alerts = monitor.process_frame()
-    if frame is not None:
-        cv2.imwrite("verification_zone_red.jpg", frame)
-        print("Saved verification_zone_red.jpg")
+    # Draw zones
+    annotated_frame = stabilizer.draw_debug_zone(frame)
     
-    monitor.stop_capture()
+    cv2.imwrite("verification_zones_final.jpg", annotated_frame)
+    print("Saved verification_zones_final.jpg")
 
 if __name__ == "__main__":
     verify_zone()
