@@ -248,38 +248,92 @@ class HazardStabilizer:
         # Track potential hazards: {track_id: consecutive_count}
         self.hazard_counter = {} 
         
-        # --- DEFINE THE DANGER ZONE (Trapezoid) ---
+        # --- DEFINE THE DANGER ZONES (3 Levels) ---
         # Normalized coordinates (0.0 to 1.0)
-        # Wider and Deeper Coverage for Dashcam
-        p1 = (0.0, 1.0)     # Bottom Left
-        p2 = (0.25, 0.55)   # Top Left (Wider top, deeper)
-        p3 = (0.75, 0.55)   # Top Right (Wider top, deeper)
-        p4 = (1.0, 1.0)     # Bottom Right
-
-        # Convert to pixels
-        roi_points = np.array([
-            [int(p1[0]*self.width), int(p1[1]*self.height)],
-            [int(p2[0]*self.width), int(p2[1]*self.height)],
-            [int(p3[0]*self.width), int(p3[1]*self.height)],
-            [int(p4[0]*self.width), int(p4[1]*self.height)]
-        ], dtype=np.int32)
         
-        self.roi_poly = roi_points
+        # 1. GREEN ZONE (Far) - Early Warning
+        # Top: y=0.55, Bottom: y=0.65
+        g_p1 = (0.25, 0.55)  # Top Left
+        g_p2 = (0.75, 0.55)  # Top Right
+        g_p3 = (0.60, 0.65)  # Bottom Right (Matches Yellow Top)
+        g_p4 = (0.40, 0.65)  # Bottom Left (Matches Yellow Top)
 
-    def is_in_danger_zone(self, box):
+        # 2. YELLOW ZONE (Medium) - Standard Alert
+        # Top: y=0.65, Bottom: y=0.75
+        y_p1 = (0.40, 0.65)
+        y_p2 = (0.60, 0.65)
+        y_p3 = (0.70, 0.75)  # Bottom Right
+        y_p4 = (0.30, 0.75)  # Bottom Left
+
+        # 3. RED ZONE (Close) - Critical Brake
+        # Top: y=0.75, Bottom: y=1.0
+        r_p1 = (0.30, 0.75)
+        r_p2 = (0.70, 0.75)
+        r_p3 = (1.0, 1.0)
+        r_p4 = (0.0, 1.0)
+        
+        # 4. SIDE ZONES (Green/Info)
+        # Left Side: Fill area between x=0 and Yellow/Red left edge
+        sl_p1 = (0.0, 0.65)   # Top Left Corner of side zone
+        sl_p2 = y_p1          # Connect to Yellow Top Left
+        sl_p3 = r_p1          # Connect to Red Top Left
+        sl_p4 = r_p4          # Connect to Red Bottom Left
+        sl_p5 = (0.0, 1.0)    # Bottom Left Corner
+        
+        # Right Side: Fill area between Yellow/Red right edge and x=1
+        sr_p1 = y_p2          # Connect to Yellow Top Right
+        sr_p2 = (1.0, 0.65)   # Top Right Corner
+        sr_p3 = (1.0, 1.0)    # Bottom Right Corner
+        sr_p4 = r_p3          # Connect to Red Bottom Right
+        sr_p5 = r_p2          # Connect to Red Top Right
+
+        def make_poly(pts):
+            return np.array([
+                [int(p[0]*self.width), int(p[1]*self.height)] for p in pts
+            ], dtype=np.int32)
+
+        self.poly_green = make_poly([g_p4, g_p1, g_p2, g_p3]) 
+        self.poly_yellow = make_poly([y_p4, y_p1, y_p2, y_p3])
+        self.poly_red = make_poly([r_p4, r_p1, r_p2, r_p3])
+        
+        self.poly_side_left = make_poly([sl_p5, sl_p1, sl_p2, sl_p3, sl_p4])
+        self.poly_side_right = make_poly([sr_p4, sr_p5, sr_p1, sr_p2, sr_p3])
+        
+        # Keep roi_poly as union for backward compat or broad checks?
+        # Let's just keep it as the total area for "is generally inside"
+        # Total area is Green + Yellow + Red
+        self.roi_poly = make_poly([r_p4, g_p1, g_p2, r_p3]) # Approx outer shell
+
+    def get_zone_level(self, box):
         """
-        Checks if the center of the bounding box is inside the driving lane.
-        Uses static polygon.
-        box format: [x1, y1, x2, y2]
+        Checks which zone the box center is in.
+        Returns: 0 (None), 1 (Green), 2 (Yellow), 3 (Red)
         """
         x1, y1, x2, y2 = box
         center_x = int((x1 + x2) / 2)
-        center_y = int(y2) # Use the bottom-center point
+        center_y = int(y2) # Bottom center
         
-        # Fallback: Static Polygon
-        # cv2.pointPolygonTest returns positive if inside, negative if outside
-        result = cv2.pointPolygonTest(self.roi_poly, (center_x, center_y), False)
-        return result >= 0
+        # Check Red first (Most critical)
+        if cv2.pointPolygonTest(self.poly_red, (center_x, center_y), False) >= 0:
+            return 3
+        # Check Yellow
+        if cv2.pointPolygonTest(self.poly_yellow, (center_x, center_y), False) >= 0:
+            return 2
+        # Check Green
+        if cv2.pointPolygonTest(self.poly_green, (center_x, center_y), False) >= 0:
+            return 1
+            
+        # Check Side Zones (Treat as Level 1 / Info)
+        if cv2.pointPolygonTest(self.poly_side_left, (center_x, center_y), False) >= 0:
+            return 1
+        if cv2.pointPolygonTest(self.poly_side_right, (center_x, center_y), False) >= 0:
+            return 1
+            
+        return 0
+
+    def is_in_danger_zone(self, box):
+        # Backward compatibility wrapper
+        return self.get_zone_level(box) > 0
 
     def update(self, detections, current_frame_detected_ids):
         """
@@ -303,8 +357,12 @@ class HazardStabilizer:
             track_id = det.get('id', -1)
             
             # --- FILTER 1: SPATIAL ---
-            if not self.is_in_danger_zone(det['box']):
+            zone_level = self.get_zone_level(det['box'])
+            if zone_level == 0:
                 continue 
+            
+            # Inject zone level into detection dict for Analyzer/Monitor
+            det['zone'] = zone_level 
 
             # --- FILTER 2: LOGICAL CORRECTIONS ---
             
@@ -348,10 +406,17 @@ class HazardStabilizer:
         return valid_hazards
 
     def draw_debug_zone(self, frame):
-        """Draws the danger zone on the frame for debugging."""
-        # Static polygon is drawn by rrem_monitor usually? Or we can draw it here if needed.
-        # Actually rrem_monitor called this. Let's keep it but just draw poly.
-        cv2.polylines(frame, [self.roi_poly], isClosed=True, color=(0, 255, 255), thickness=2)
+        """Draws the 3 danger zones on the frame."""
+        # Green (Far) - BGR: (0, 255, 0)
+        cv2.polylines(frame, [self.poly_green], isClosed=True, color=(0, 255, 0), thickness=2)
+        # Side Zones (Green)
+        cv2.polylines(frame, [self.poly_side_left], isClosed=True, color=(0, 255, 0), thickness=2)
+        cv2.polylines(frame, [self.poly_side_right], isClosed=True, color=(0, 255, 0), thickness=2)
+        
+        # Yellow (Medium) - BGR: (0, 255, 255)
+        cv2.polylines(frame, [self.poly_yellow], isClosed=True, color=(0, 255, 255), thickness=2)
+        # Red (Close) - BGR: (0, 0, 255)
+        cv2.polylines(frame, [self.poly_red], isClosed=True, color=(0, 0, 255), thickness=2)
         return frame
 
 class HazardAnalyzer:
@@ -381,6 +446,7 @@ class HazardAnalyzer:
             area = w * h
             aspect_ratio = w / h if h > 0 else 0
             name = names[cls_id]
+            zone_level = getattr(box, 'zone', 0) # 3=Red, 2=Yellow, 1=Green
 
             # Determine direction if frame_shape is provided
             direction_str = ""
@@ -458,54 +524,75 @@ class HazardAnalyzer:
 
             # 2. Generate Alerts
             
+            # Determine Prefix based on Zone (and Type)
+            # Red (3) -> CRITICAL BRAKE
+            # Yellow (2) -> CAUTION
+            # Green (1) -> INFO / AHEAD
+            
+            prefix = ""
+            if zone_level == 3:
+                prefix = "CRITICAL BRAKE: "
+            elif zone_level == 2:
+                prefix = "CAUTION: "
+            elif zone_level == 1:
+                prefix = "AHEAD: "
+            
+            # --- GENERATE ALERT STRING ---
+            alert_str = ""
+            
             # BIKER
             if cls_id in BIKER_CLASSES:
-                if in_lane:
-                    alerts.append(f"BIKER AHEAD: {name}")
-                elif is_approaching:
-                    alerts.append(f"BIKER MERGING: {name}")
+                if zone_level == 3:
+                     alert_str = f"CRITICAL BRAKE: BIKER!"
                 else:
-                     # Peripheral biker - minor alert or suppress? 
-                     # User wants to know about object approaching, so maybe just "Biker (Left)"
-                     pass # We will rely on the "Biker (Left)" generic or suppress if far?
-                     # Let's keep existing behavior but maybe refine text
-                     alerts.append(f"BIKER: {name}{direction_str}")
+                     alert_str = f"{prefix}BIKER {direction_str}"
 
             # HAZARD (Animals/Peds)
             elif cls_id in HAZARD_CLASSES:
-                if in_lane or is_approaching:
-                    prefix = "HAZARD AHEAD" if in_lane else "HAZARD APPROACHING"
-                    alerts.append(f"{prefix}: {name}")
+                if zone_level == 3:
+                     alert_str = f"CRITICAL BRAKE: {name}!"
                 else:
-                    # Still warn for Peds even if outside, but maybe less priority?
-                    # kept for safety
-                    alerts.append(f"HAZARD: {name}{direction_str}")
+                     alert_str = f"{prefix}{name}{direction_str}"
 
             # VEHICLES (Standard)
-            # Only alert if: Fast Approach (in lane), Merging (approaching), or Crash
-            # Standard "Car on left" is noise.
             elif cls_id in VEHICLE_CLASSES:
-                 if is_approaching:
-                     alerts.append(f"VEHICLE MERGING: {name}")
+                 if zone_level == 3:
+                      # Red zone vehicle -> BRAKE
+                      alert_str = f"CRITICAL BRAKE: {name}!"
+                 elif is_approaching:
+                      alert_str = f"MERGING: {name}"
+                 elif zone_level >= 2:
+                      # Yellow zone vehicle -> Only alert if closer/hazard? 
+                      # Standard car following is normal. 
+                      # Only alert if it's a hazard?
+                      # For now, let's trust the zone. If it's in Yellow zone, it's a "Detection".
+                      # User wants to know detection boxes.
+                      # Maybe just "Car Ahead" for yellow?
+                      alert_str = f"{prefix}{name}"
+                 # Green zone vehicles are ignored unless approaching?
+                 elif zone_level == 1 and is_approaching:
+                       alert_str = f"AHEAD: {name}"
 
-            # TRAFFIC SIGNS & LIGHTS
+            # TRAFFIC SIGNS
             elif cls_id in TRAFFIC_CLASSES:
-                if in_lane:
-                    if cls_id == 11:
-                         alerts.append(f"STOP SIGN AHEAD")
-                    elif cls_id == 9:
-                         alerts.append(f"TRAFFIC LIGHT AHEAD")
+                if cls_id == 11 and zone_level >= 2: # Stop Sign in Yellow/Red
+                     alert_str = f"STOP SIGN"
+                elif cls_id == 9 and zone_level >= 2:
+                     alert_str = f"TRAFFIC LIGHT"
             
-            # GENERIC OBSTACLE (SAM / Unknown)
+            # GENERIC OBSTACLE
             elif (cls_id not in VEHICLE_CLASSES and 
                   cls_id not in BIKER_CLASSES and 
                   cls_id not in HAZARD_CLASSES and
                   cls_id not in TRAFFIC_CLASSES):
                   if area > 3000:
-                      if in_lane:
-                          alerts.append(f"OBSTACLE AHEAD")
-                      elif is_approaching:
-                          alerts.append(f"OBSTACLE MERGING")
+                      if zone_level == 3:
+                          alert_str = "CRITICAL BRAKE: OBSTACLE!"
+                      elif zone_level >= 1:
+                          alert_str = f"{prefix}OBSTACLE"
+
+            if alert_str:
+                alerts.append(alert_str)
             
             # 3. Fast Approach (Only if in lane)
             # Apply to ALL tracked objects (Vehicles + Generic Obstacles)
@@ -520,10 +607,16 @@ class HazardAnalyzer:
                         growth = (area - prev_area) / prev_area
                         disp_name = name if (cls_id in VEHICLE_CLASSES) else "OBSTACLE"
                         
-                        if growth > 0.30 and area > 1500:
-                             alerts.append(f"CRASH IMMINENT (<1s): {disp_name}")
-                        elif growth > 0.10 and area > 1500:
-                             alerts.append(f"CRASH WARNING (<2s): {disp_name}")
+                        # Only issue CRASH/BRAKE alerts if in Red/Yellow zones
+                        # Logic: Red = Brake, Yellow = Caution
+                        if zone_level == 3:
+                            if growth > 0.30 and area > 1500:
+                                 alerts.append(f"CRASH IMMINENT (<1s): {disp_name}")
+                            elif growth > 0.10 and area > 1500:
+                                 alerts.append(f"CRASH WARNING (<2s): {disp_name}")
+                        elif zone_level == 2:
+                            if growth > 0.10 and area > 1500:
+                                 alerts.append(f"CAUTION: Fast Approach {disp_name}")
 
             # 4. Side Traffic (Refined)
             # Only if NOT in lane (obviously) and is very wide/close
@@ -558,29 +651,12 @@ class HazardAnalyzer:
                     area2 = (b2[2]-b2[0]) * (b2[3]-b1[1])
                     iou = intersection_area / float(area1 + area2 - intersection_area)
                     
-                    if iou > 0.15: # Significant overlap
+                    if iou > 0.30: # Significant overlap
                         alerts.append("POSSIBLE CRASH")
                         
         # 6. Lane Deviation (Flow Heuristic)
-        # Calculate flow of all tracked objects
-        # If all valid objects shift LEFT, we are drifting RIGHT (and vice versa)
-        deltas = []
-        for tid in current_ids:
-            hist = self.track_history.get(tid, {}).get('center', [])
-            if len(hist) >= 2:
-                # Compare last two points
-                dx = hist[-1][0] - hist[-2][0]
-                deltas.append(dx)
+        # Disabled
         
-        if len(deltas) > 2:
-            avg_dx = sum(deltas) / len(deltas)
-            # Threshold for drift (pixels per frame)
-            # If everything moves left (negative dx) -> we drift right
-            if avg_dx < -5: 
-                alerts.append("LANE DEVIATION: RIGHT")
-            elif avg_dx > 5:
-                alerts.append("LANE DEVIATION: LEFT")
-
         return list(set(alerts)) # Deduplicate
 
 def draw_alert(frame, message, color=(0, 0, 255)):
@@ -667,8 +743,17 @@ class DistanceMonitor:
                     closest_obj = det
                     
         if closest_obj:
+            # Check zone of closest object for Critical Alert
+            # Logic: Yellow = Caution, Red = Brake
+            obj_zone = closest_obj.get('zone', 0)
+            
             if closest_dist < self.tailgating_distance:
-                return "CRITICAL: BRAKE!", (0, 0, 255), closest_dist, closest_obj['box']
+                if obj_zone == 3: # Red
+                    return "CRITICAL: BRAKE!", (0, 0, 255), closest_dist, closest_obj['box']
+                elif obj_zone == 2: # Yellow
+                     return "CAUTION: Too Close", (0, 165, 255), closest_dist, closest_obj['box']
+                else: 
+                     return "WARNING: Too Close", (0, 165, 255), closest_dist, closest_obj['box']
             elif closest_dist < self.critical_distance:
                 return "WARNING: Too Close", (0, 165, 255), closest_dist, closest_obj['box']
             else:
