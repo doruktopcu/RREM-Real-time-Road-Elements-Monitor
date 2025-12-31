@@ -1,98 +1,117 @@
-from ultralytics import YOLO
+from ultralytics import YOLOWorld
 import os
-import argparse
-import shutil
 import glob
+from tqdm import tqdm
+import cv2
+import ssl
 
-def auto_label(source_dir, model_path, conf_threshold=0.40):
-    """
-    Auto-labels images in the source directory using a YOLO model.
-    Moves generated labels to the same directory as images for LabelImg compatibility.
-    """
-    
-    # 1. Load model
-    print(f"Loading model: {model_path}...")
-    try:
-        model = YOLO(model_path)
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        return
+# Disable SSL verification for CLIP model download
+ssl._create_default_https_context = ssl._create_unverified_context
 
-    # 2. Define classes to KEEP (0=person, 1=bike, 2=car, 3=motorcycle, 5=bus, 7=truck, 15=cat, 16=dog)
-    # Adjusting based on standard COCO classes for road elements relevant to RREM
-    relevant_classes = [0, 1, 2, 3, 5, 7, 15, 16]
+# Define the dataset path
+DATASET_DIR = "dataset/unlabeled_datasets"
+
+# Schema (from Implementation Plan):
+# 0: Person, 1: Bicycle, 2: Car, 3: Motorcycle, 4: Bus, 5: Truck, 6: Cat, 7: Dog, 
+# 8: Traffic Light, 9: Stop Sign, 10: Accident, 11: Pothole, 12: Fire Hazard, 
+# 13: Fox, 14: Chicken, 15: Deer, 16: Horse, 17: Pigeon, 18: Sheep, 19: Cow
+
+CATEGORY_CONFIG = {
+    "potholes": {"classes": ["pothole"], "ids": [11], "type": "full_image"},
+    "fire_hazard": {"classes": ["fire"], "ids": [12], "type": "full_image"},
+    "fox": {"classes": ["fox"], "ids": [13], "type": "inference"},
+    "chicken": {"classes": ["chicken"], "ids": [14], "type": "inference"},
+    "deer": {"classes": ["deer"], "ids": [15], "type": "inference"},
+    "horse": {"classes": ["horse"], "ids": [16], "type": "inference"},
+    "pigeon": {"classes": ["pigeon"], "ids": [17], "type": "inference"},
+    "sheep": {"classes": ["sheep"], "ids": [18], "type": "inference"},
+    "cow": {"classes": ["cow"], "ids": [19], "type": "inference"},
+    "cat": {"classes": ["cat"], "ids": [6], "type": "inference"},
+    "dog": {"classes": ["dog"], "ids": [7], "type": "inference"},
+    "unlabeled_people_cars": {
+        "classes": ["person", "car", "motorcycle", "bus", "truck"],
+        "ids": [0, 2, 3, 4, 5],
+        "type": "inference"
+    }
+}
+
+def auto_label():
+    # Load YOLO-World model
+    print("Loading YOLO-World model...")
+    model = YOLOWorld("yolov8l-worldv2.pt")
     
-    print(f"Starting inference on {source_dir}...")
-    print(f"Threshold: {conf_threshold}")
-    
-    # 3. Run inference
-    # We use a temporary project folder to capture the output, then move it.
-    temp_project = os.path.join(source_dir, "temp_inference")
-    temp_name = "labels_generated"
-    
-    results = model.predict(
-        source=source_dir, 
-        save_txt=True,       
-        save_conf=False,     
-        classes=relevant_classes,
-        conf=conf_threshold,           
-        project=temp_project, 
-        name=temp_name,
-        stream=True # Use stream to avoid loading all results in memory if many images
-    )
-    
-    # Execute the generator
-    for _ in results:
-        pass
-        
-    print("Inference complete. Organizing labels...")
-    
-    # 4. Move labels to be side-by-side with images (LabelImg preferred format)
-    # YOLO saves txt files in: project/name/labels/
-    generated_labels_dir = os.path.join(temp_project, temp_name, "labels")
-    
-    if os.path.exists(generated_labels_dir):
-        txt_files = glob.glob(os.path.join(generated_labels_dir, "*.txt"))
-        count = 0
-        for txt_file in txt_files:
-            filename = os.path.basename(txt_file)
-            dest = os.path.join(source_dir, filename)
-            shutil.move(txt_file, dest)
-            count += 1
+    # Iterate through configured categories
+    for folder, config in CATEGORY_CONFIG.items():
+        folder_path = os.path.join(DATASET_DIR, folder)
+        if not os.path.exists(folder_path):
+            print(f"Warning: Folder {folder_path} does not exist. Skipping.")
+            continue
             
-        print(f"Moved {count} label files to {source_dir}")
+        print(f"Processing folder: {folder}...")
         
-    # 5. Cleanup
-    if os.path.exists(temp_project):
-        shutil.rmtree(temp_project)
-        print("Cleaned up temporary folders.")
+        # Set custom classes only if doing inference
+        if config.get("type") == "inference":
+            model.set_classes(config["classes"])
         
-    # 6. Create classes.txt if not exists (LabelImg needs this)
-    classes_file = os.path.join(source_dir, "classes.txt")
-    if not os.path.exists(classes_file):
-        # We should list ALL classes that the user might want to annotate, 
-        # but realistically LabelImg uses a predefined list or reads from txt.
-        # Ideally, we write the names corresponding to the model's classes.
-        # But for new labeling, usually we just want the ones we care about.
-        # Let's write the names from the model.
-        print("Creating classes.txt...")
-        with open(classes_file, 'w') as f:
-            for i in range(len(model.names)):
-                f.write(f"{model.names[i]}\n")
+        # Create labels directory
+        labels_dir = os.path.join(folder_path, "labels")
+        os.makedirs(labels_dir, exist_ok=True)
+        
+        # extensions to look for
+        valid_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
+        image_files = []
+        for ext in valid_extensions:
+            image_files.extend(glob.glob(os.path.join(folder_path, ext)))
+            image_files.extend(glob.glob(os.path.join(folder_path, ext.upper())))
+            
+        # Process images
+        for img_path in tqdm(image_files, desc=f"Labeling {folder}"):
+            # Prepare label file name
+            basename = os.path.basename(img_path)
+            filename_no_ext = os.path.splitext(basename)[0]
+            label_path = os.path.join(labels_dir, f"{filename_no_ext}.txt")
+            
+            # For FULL IMAGE labeling: Overwrite if empty or strictly overwrite?
+            # User said files are empty. We should overwrite them.
+            # If type is inference: Skip if exists (Resume)
+            
+            is_full_label = config.get("type") == "full_image"
+            
+            if not is_full_label and os.path.exists(label_path):
+                continue
+            
+            if is_full_label:
+                # Blindly write full class label
+                try:
+                    with open(label_path, "w") as f:
+                        # Center x, center y, width, height (all normalized 0-1)
+                        # Full image = 0.5 0.5 1.0 1.0
+                        class_id = config["ids"][0] 
+                        f.write(f"{class_id} 0.500000 0.500000 1.000000 1.000000\n")
+                except Exception as e:
+                    print(f"Error writing label for {img_path}: {e}")
+                continue
+
+            try:
+                # Perform inference
+                results = model.predict(img_path, conf=0.25, verbose=False)
                 
-    print("\nDone! Images and .txt labels are now paired in:")
-    print(f"  {source_dir}")
-    print("\nYou can now open this folder in LabelImg.")
+                result = results[0]
+                
+                with open(label_path, "w") as f:
+                    for box in result.boxes:
+                        # Get class index in the current model's list (0, 1, 2...)
+                        cls_idx = int(box.cls.item())
+                        
+                        if cls_idx < len(config["ids"]):
+                            global_id = config["ids"][cls_idx]
+                            x, y, w, h = box.xywhn[0].tolist()
+                            f.write(f"{global_id} {x:.6f} {y:.6f} {w:.6f} {h:.6f}\n")
+            except Exception as e:
+                print(f"Error processing {img_path}: {e}")
+                continue
+
+    print("Auto-labeling complete!")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Auto-label dataset using YOLO model.")
-    parser.add_argument("--source", type=str, default="dataset/raw_frames", help="Folder containing images to label")
-    parser.add_argument("--model", type=str, default="yolo11n.pt", help="Path to YOLO model")
-    parser.add_argument("--conf", type=float, default=0.4, help="Confidence threshold")
-    
-    args = parser.parse_args()
-    
-    if not os.path.exists(args.source):
-        print(f"Error: Source directory '{args.source}' does not exist.")
-    else:
-        auto_label(args.source, args.model, args.conf)
+    auto_label()
