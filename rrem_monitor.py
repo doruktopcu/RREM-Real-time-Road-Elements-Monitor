@@ -142,8 +142,6 @@ class RREMMonitor:
         results = self.model.track(frame, persist=True, conf=self.conf_threshold, tracker="bytetrack.yaml", verbose=False, device=self.device, classes=relevant_classes)
         result = results[0]
         
-        # Debug: Print classes if using custom model
-        if relevant_classes is None:
 
         # --- HAZARD STABILIZER LOGIC ---
         h, w = frame.shape[:2]

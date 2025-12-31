@@ -5,20 +5,24 @@
 
 ---
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1N8frlROTmB2yyXLA4JnXkHSZwQfkLorx?usp=sharing)
+
 ## Abstract
 
-**Real-time Road Elements Monitor (RREM)** is an advanced computer vision-based driver assistance system designed to democratize high-end safety features found in autonomous vehicles. Utilizing the **YOLO11** architecture for state-of-the-art object detection and a custom logic layer for hazard assessment, RREM detects, tracks, and evaluates road risks in real-time. This document serves as a comprehensive technical guide, detailing the system's architecture, detection logic, dataset preparation methodology, and operational workflow. The system distinguishes itself through a multi-zone hazard evaluation engine, heuristic-based collision warnings, and a unified dataset covering 20 distinct classes of road elements, from vulnerable road users to environmental hazards.
+**Real-time Road Elements Monitor (RREM)** represents a significant evolution in the field of Advanced Driver Assistance Systems (ADAS), specifically targeting the safety gaps prevalent in unstructured driving environments. While traditional ADAS solutions focus heavily on vehicle and pedestrian tracking in regulated urban settings, they often fail to account for the chaotic nature of rural or developing road infrastructure. RREM addresses this by enhancing road safety through the detection of a wide array of environmental hazards often overlooked by conventional systems. Leveraging the cutting-edge **YOLO11** object detection architecture and optimized for heterogeneous computing environments—specifically Apple Silicon (MPS) and NVIDIA CUDA platforms—RREM provides robust, real-time alerts for 20 distinct classes. These classes encompass vulnerable road users (pedestrians, cyclists), unexpected animal hazards (cows, sheep, deer), and critical infrastructure anomalies (potholes, fire hazards). This document details the system's modular architecture, the curation of a novel, unified 20-class dataset generated via a semi-supervised YOLO-World auto-labeling pipeline, and the implementation of a multi-zone hazard assessment logic designed to prioritize driver attention. Experimental results validate the system's robustness, achieving a mean Average Precision (mAP@50) of **0.835** and a recall of **0.778**. These metrics demonstrate the system's high efficacy and reliability in diverse, real-world scenarios where reaction time is paramount.
 
 ---
 
 ## 1. Introduction
 
-Traffic accidents remain a leading cause of mortality worldwide. While modern luxury vehicles come equipped with Advanced Driver Assistance Systems (ADAS), a vast majority of vehicles on the road lack these capabilities. RREM aims to bridge this gap by providing a software-based solution that transforms a standard dashcam feed into an intelligent safety guardian.
+The automotive industry has seen a paradigm shift with the integration of **Advanced Driver Assistance Systems (ADAS)** into modern vehicles. These systems have undeniably reduced accident rates; however, a majority of current implementations are trained and tested within highly structured environments—marked by clear lane markings, predictable traffic flow, and standard signage. This limitation leaves a significant safety gap when vehicles operate in unstructured scenarios typical of rural areas or developing regions. In these environments, drivers frequently encounter "long-tail" distribution hazards that standard datasets do not adequately represent, including stray livestock, deteriorating road surfaces (potholes), and erratic vulnerable road users.
 
-The core objectives of RREM are:
-1.  **Accurate Detection**: identifying a wide range of road elements, including vehicles, pedestrians, animals, and infrastructure.
-2.  **Intelligent Risk Assessment**: Distinguishing between benign objects and actual hazards using spatial and temporal analysis.
-3.  **Real-time Performance**: Operating efficiently on standard hardware (consumer GPUs/CPUs) with optimization for Apple Metal (MPS) and CUDA.
+RREM addresses this critical gap by proposing a comprehensive, low-latency monitoring system capable of identifying a broader spectrum of road elements. Unlike proprietary "black-box" solutions found in high-end vehicles, RREM is designed with accessibility and edge-deployment in mind.
+
+Our contribution to the field is threefold:
+1.  **Hardware-Agnostic Perception Engine**: A real-time detection pipeline that is compatible with consumer-grade hardware, bridging the gap between high-performance workstations and accessible edge devices.
+2.  **Unified Anomaly Dataset**: A unified 20-class dataset that aggregates diverse data sources and is enriched via a novel open-vocabulary auto-labeling strategy.
+3.  **Temporal Hazard Logic**: A temporal stabilization and varying-zone logic that effectively minimizes false positives caused by sensory noise while ensuring critical responsiveness during imminent collision scenarios.
 
 ---
 
@@ -27,10 +31,10 @@ The core objectives of RREM are:
 The RREM system is built on a modular pipeline architecture, separating perception, tracking, and decision-making into distinct stages.
 
 ### 2.1 Hardware Acceleration
-To ensure real-time latency (target > 30 FPS), the system automatically detects and leverages hardware acceleration:
-*   **Apple Silicon (M1/M2/M3)**: Uses Metal Performance Shaders (MPS) for high-efficiency inference.
-*   **NVIDIA GPUs**: Uses CUDA execution providers.
-*   **CPU Fallback**: Optimized OpenVINO or standard PyTorch execution as a backup.
+To ensure the system meets the strict latency requirements of ADAS (typically requiring response times under 100ms), RREM implements a hardware abstraction layer that dynamically selects the optimal execution path:
+*   **Apple Metal (MPS)**: The system is heavily optimized for macOS devices, utilizing the Metal Performance Shaders (MPS) graph to offload matrix operations to the Neural Engine on M-series chips.
+*   **CUDA**: For standard desktop and embedded GPU environments, the system utilizes NVIDIA's CUDA libraries for parallel processing.
+*   **CPU Fallback**: A highly optimized OpenVINO-compatible execution path ensures universally compatible deployment.
 
 ### 2.2 Software Stack
 *   **Perception Engine**: Ultralytics YOLO11 (v11n/v11s/v11m) for object detection.
@@ -46,24 +50,17 @@ The system uses the **YOLO11** (You Only Look Once) architecture. This single-st
 *   **Model Variants**: The system supports `yolo11n` (nano) for edge devices and `yolo11m` (medium) for higher accuracy.
 *   **Classes**: The model is trained on a custom **Unified Schema** of 20 classes (detailed in Section 4).
 
-### 3.2 Multi-Stage Tracking
-Raw detections are unstable. RREM implements a multi-stage tracking approach:
-1.  **ByteTrack**: An efficient association method that tracks objects across frames, handling occlusions and associating low-confidence detections.
-2.  **SimpleTracker (Custom)**: A backup IOU-based greedy matcher implemented in `utils.py` to handle edge cases or specific hazard tracking without heavy overhead.
-
-### 3.3 Hazard Assessment Logic (The "Brain")
+### 3.2 Hazard Assessment Logic (The "Brain")
 The core innovation of RREM lies in its `HazardAnalyzer` and `HazardStabilizer` modules (located in `utils.py`). Instead of alerting on every detection, the system applies rigorous filters:
 
 #### A. Spatial Zoning (Danger Zones)
-The field of view is logically divided into three primary zones defined by polygon geometry:
-*   **Green Zone (Far)**: Top-central region. Objects here trigger "Awareness" logs but no audio alerts.
-*   **Yellow Zone (Medium)**: Middle band. Objects here trigger "Caution" warnings.
-*   **Red Zone (Close)**: Bottom-central region immediately in front of the ego-vehicle. Objects here trigger "CRITICAL BRAKE" alerts.
-
-Side zones (Left/Right) are monitored to detect cutting-in vehicles ("Side Traffic").
+A raw 2D bounding box detection is insufficient for generating meaningful safety warnings. A system that alerts the driver to every detected object would quickly lead to "alert fatigue." RREM introduces a "Hazard Analyzer" module that projects a 3D spatial logic onto the 2D image plane. The camera's field of view is segmented into three static, polygon-based zones:
+*   **Green Zone (Far Field)**: Objects detected in the peripheral or distant field are tracked for situational awareness but do not trigger audio alerts, reducing driver distraction.
+*   **Yellow Zone (Mid Field)**: This represents the caution area. Detections entering this zone initiate visual "Caution" warnings, preparing the driver for potential action.
+*   **Red Zone (Near Field)**: This is the critical braking area immediately in front of the ego-vehicle. Any hazard entering this zone triggers an immediate, high-priority "CRITICAL BRAKE" audio-visual alert.
 
 #### B. Temporal Stabilization
-To prevent flickering alerts (false positives from single-frame glitches), the `HazardStabilizer` requires a hazard to be present for a minimum buffer of frames (default: 5) before validating it. It creates a `BoxShim` object to maintain persistence across the pipeline.
+To mitigate false positives caused by camera sensor noise, motion blur, or single-frame detection glitches, we implement a specific \textit{Hazard Stabilizer}. This module employs a temporal buffer of length $N$ (default $N=5$ frames). An object is not classified as a confirmed hazard until it persists within a danger zone for $N$ consecutive frames. This logic acts as a low-pass filter for the detection stream, significantly reducing flickering alerts without compromising reaction time for sustained, genuine threats.
 
 #### C. Distance Estimation
 A pinhole camera model is approximately applied in the `DistanceMonitor`.
@@ -72,9 +69,7 @@ A pinhole camera model is approximately applied in the `DistanceMonitor`.
 *   **Tailgating Logic**: If a vehicle in the center lane is closer than the braking distance (e.g., <8m), a "Tailgating" warning is issued.
 
 #### D. Fast Approach Detection (Time-to-Collision Heuristic)
-The system calculates the expansion rate of bounding boxes. An object that is rapidly increasing in area (Visual Looming) implies a decreasing Time-to-Collision (TTC).
-*   **Metric**: Area Growth Rate $\Delta A / A_{prev}$.
-*   **Threshold**: A growth rate > 30% over 4 frames generally indicates an imminent collision (<1s), triggering a "CRASH IMMINENT" alert regardless of zone.
+The system calculates the expansion rate of bounding boxes. An object that is rapidly increasing in area (Visual Looming) implies a decreasing Time-to-Collision (TTC). A rapid positive change in area (**>30%** inter-frame expansion) signifies a "Visual Looming" effect, triggering a fast-approach warning even if the object is currently outside the defined Red Zone.
 
 ---
 
@@ -83,9 +78,16 @@ The system calculates the expansion rate of bounding boxes. An object that is ra
 A robust model requires diverse data. We created a **Unified Dataset** by merging multiple sources.
 
 ### 4.1 Data Sources
-1.  **Raw Frames**: Extracted from high-resolution dashcam footage (COCO-labeled).
-2.  **Custom Crash Dataset**: Specialized frames containing accidents and wreckage.
-3.  **Unlabeled Datasets**: A collected set of "edge cases" (Potholes, Animals, Fire Hazards) that were initially unlabeled.
+### 4.1 Data Sources
+1.  **Car Accidents and Deformation Dataset**: Bounding box–annotated car images showing varying levels of damage (Source: [Kaggle/Marslan Arshad](https://www.kaggle.com/datasets/marslanarshad/car-accidents-and-deformation-datasetannotated)).
+2.  **Karlsruhe Dataset**: Labeled Cars and Pedestrians, originally used for part-based object detection (Geiger et al., NIPS 2011).
+3.  **Animals Datasets**:
+    - **Animals-10** (Source: [Kaggle/Alessio Corrado](https://www.kaggle.com/datasets/alessiocorrado99/animals10))
+    - **Animals-90** (Subset) (Source: [Kaggle/Sourav Banerjee](https://www.kaggle.com/datasets/iamsouravbanerjee/animal-image-dataset-90-different-animals))
+4.  **Hazard Datasets**:
+    - **FIRE Dataset** (Source: [Kaggle/phylake1337](https://www.kaggle.com/datasets/phylake1337/fire-dataset))
+    - **Pothole Detection Dataset** (Source: [Kaggle/atulyakumar98](https://www.kaggle.com/datasets/atulyakumar98/pothole-detection-dataset))
+5.  **Proprietary Data**: Self-collected footage using a **70mai A800SE** dashcam mounted on a Fiat Egea (Front Window), capturing local road conditions and edge cases. [**Download Unified Dataset**](https://drive.google.com/file/d/1PioXMpZysQ8eAN1ewytGi8kr7uTgaWLx/view?usp=sharing)
 
 ### 4.2 Auto-Labeling Pipeline
 To prepare the `unlabeled_datasets`, we employed a semi-supervised learning approach using **YOLO-World (v2)**, an open-vocabulary detector.
@@ -182,15 +184,15 @@ python3 merge_datasets.py
 This section presents a quantitative evaluation of the RREM system's object detection capabilities, based on a rigorous training regimen.
 
 ### 7.1 Experimental Setup
-The model was trained using the following configuration:
-*   **Architecture**: YOLO11m (Medium)
-*   **Epochs**: 50
-*   **Batch Size**: 128
-*   **Optimizer**: Auto (SGD/AdamW) with Momentum=0.937 and Weight Decay=0.0005
-*   **Data Augmentation**: Mosaic (1.0) and Random Erasing (0.4) were employed to enhance robustness against partial occlusions.
+The model was trained using the following hyperparameters, selected to prevent overfitting while ensuring convergence:
+*   **Architecture**: YOLO11m (Medium parameter count).
+*   **Epochs**: 50, with early stopping enabled.
+*   **Batch Size**: 128 images per batch.
+*   **Optimizer**: Auto (adaptive selection between SGD and AdamW) with Momentum=0.937 and Weight Decay=0.0005.
+*   **Data Augmentation**: Aggressive augmentations including Mosaic (1.0) and Random Erasing (0.4) were employed to enhance robustness against partial occlusions and varying lighting conditions.
 
 ### 7.2 Quantitative Metrics
-The training process concluded with the model converging to a high degree of accuracy. The final evaluation metrics on the validation set are as follows:
+The training process concluded with the model converging to a high degree of accuracy. The final evaluation metrics on the held-out validation set are as follows:
 
 | Metric | Value | Description |
 | :--- | :--- | :--- |
@@ -202,19 +204,20 @@ The training process concluded with the model converging to a high degree of acc
 The class-wise performance analysis reveals that the model performs exceptionally well on distinct, rigid objects such as **Potholes (mAP@50: 0.995)** and **Fire Hazards (mAP@50: 0.995)**, validating the efficacy of the full-image auto-labeling strategy for environmental hazards. Vehicle classes such as **Cars** also showed strong performance (**mAP@50: 0.934**), ensuring reliable forward collision warnings.
 
 ### 7.3 System Latency
-Real-time inference tests on an **Apple M2 Pro** processor yielded an average frame rate of **~28 FPS** for the YOLO11m model, demonstrating that the system meets the latency requirements for real-time driver assistance without specialized dedicated hardware.
+Real-time inference tests were conducted on an **Apple M1 Pro MacBook** using the Metal Performance Shaders (MPS) backend. The system achieved a variable frame rate of **15-30 FPS** for the YOLO11m model. This performance demonstrates that RREM meets the latency requirements for real-time driver assistance on accessible, consumer-grade hardware. It is worth noting that while the model training was accelerated using an enterprise-grade **NVIDIA A100 GPU**, the inference performance reported here is exclusively based on the Apple Silicon platform, reflecting the target deployment environment.
 
 ### 7.4 Limitations & Future Work
+While the current system demonstrates robust performance, we acknowledge several limitations that will guide future development:
+
 **Current Dataset Limitations**:
-It is important to note that the current iteration of the Unified Dataset **does not contain traffic signs or traffic lights**. Consequently, the system in its current state will not detect traffic control signals. Future versions of RREM will explicitly incorporate a dedicated dataset for **Turkish Road Standards**, including local traffic signage and traffic light configurations, to fully support compliance with local traffic regulations.
+The current Unified Dataset lacks specific samples for local traffic signs and traffic lights. Consequently, the system does not currently detect traffic control signals reliably in the deployment region. Future versions will explicitly incorporate a dedicated dataset for **Turkish Road Standards**, including local traffic signage and light configurations, to ensure full compliance with local traffic regulations.
 
----
-
-## 8. Future Roadmap
-
-1.  **Integration of SAM (Segment Anything Model)**: For pixel-perfect road segmentation and drivable area analysis.
-2.  **Stereo Vision Support**: For accurate depth perception without single-camera estimation errors.
-3.  **V2X Communication**: Broadcasting hazard alerts to nearby RREM-enabled vehicles.
+**Future Roadmap**:
+1.  **Advanced Segmentation**: We plan to integrate the Segment Anything Model (SAM) for pixel-level drivable area analysis, moving beyond simple bounding boxes to understand road boundaries.
+2.  **Stereo Vision Support**: We intend to implement dual-camera support for true depth perception, replacing the current monocular estimation heuristic with accurate triangulation.
+3.  **V2X Connectivity**: A key future milestone is enabling the system to broadcast detected hazards (e.g., potholes) to a cloud server. This would facilitate the creation of a crowd-sourced map of road conditions, alerting other drivers to hazards before they are even within visual range.
+4.  **Rear-View Monitoring**: Implementing rear tracking to provide alerts for potential rear-end collisions.
+5.  **General Obstacle Segmentation**: Detecting random items/debris on the road that don't fit into standard classes but pose a driving risk.
 
 ---
 
@@ -222,5 +225,4 @@ It is important to note that the current iteration of the Unified Dataset **does
 
 1.  Redmon, J., et al. "You Only Look Once: Unified, Real-Time Object Detection." *(CVPR 2016)*
 2.  Ultralytics YOLOv8/v11 Docs: https://docs.ultralytics.com
-3.  Zhang, Y., et al. "ByteTrack: Multi-Object Tracking by Associating Every Detection Box." *(ECCV 2022)*
-4.  Wang, T., et al. "YOLO-World: Real-Time Open-Vocabulary Object Detection." *(CVPR 2024)*
+3.  Wang, T., et al. "YOLO-World: Real-Time Open-Vocabulary Object Detection." *(CVPR 2024)*
