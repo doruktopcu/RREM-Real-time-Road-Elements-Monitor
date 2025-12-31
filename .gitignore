@@ -6,12 +6,13 @@ CMP-722 Project Proposal - Doruk Topcu.pdf
 *.jpg
 *.png
 *.txt
+!requirements.txt
+!RREM-IEEE-Format.txt
 *.csv
 *.DS_Store
 *.cache
 *.cpython-312.pyc
 *.zip
-*.pt
 *.mk
 *.bat
 *.jar

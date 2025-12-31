@@ -148,7 +148,7 @@ RREM-Real-time-Road-Elements-Monitor/
 
 ### Installation
 ```bash
-git clone https://github.com/doruktopcu/RREM.git
+git clone https://github.com/doruktopcu/RREM-Real-time-Road-Elements-Monitor.git
 cd RREM
 pip install -r requirements.txt
 ```
