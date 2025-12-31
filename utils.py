@@ -482,11 +482,7 @@ class HazardAnalyzer:
             dx = 0
             
             if track_id != -1:
-                # We need to update history here first before checking approach
-                # (History update code block was below, let's move it up or duplicate/reference)
-                # Actually, let's just do the history update in the main block below, 
-                # but we need 'dx' for the Alert generation which happens... 
-                # modifying the structure slightly to update history FIRST.
+                # History update moved to main loop below for efficiency
                 pass 
 
             # Refactored Loop Logic:
@@ -562,12 +558,7 @@ class HazardAnalyzer:
                  elif is_approaching:
                       alert_str = f"MERGING: {name}"
                  elif zone_level >= 2:
-                      # Yellow zone vehicle -> Only alert if closer/hazard? 
-                      # Standard car following is normal. 
-                      # Only alert if it's a hazard?
-                      # For now, let's trust the zone. If it's in Yellow zone, it's a "Detection".
-                      # User wants to know detection boxes.
-                      # Maybe just "Car Ahead" for yellow?
+                      # Yellow zone vehicle -> Caution
                       alert_str = f"{prefix}{name}"
                  # Green zone vehicles are ignored unless approaching?
                  elif zone_level == 1 and is_approaching:

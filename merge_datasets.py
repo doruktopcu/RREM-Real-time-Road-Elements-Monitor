@@ -21,12 +21,9 @@ CLASS_NAMES = [
 ]
 
 # Mapping from Raw Frames (COCO 80) to Unified Schema
-# Based on checking logic: COCO IDs need remixing to 0-19 range.
+# COCO IDs need remixing to 0-19 range.
 # Standard COCO: 0=person, 1=bicycle, 2=car, 3=motorcycle, 5=bus, 7=truck, 9=traffic light, 11=stop sign, 15=cat, 16=dog, ...
-# We need to explicitly map the IDs found in raw_frames (which are COCO) to our new IDs.
-# Assuming raw_frames used standard COCO numbering or the 'classes.txt' found earlier.
-# The 'classes.txt' found earlier in step 25 seemed to list 80 COCO classes.
-# Let's define the map. Keys are COCO IDs, Values are Target IDs.
+# Explicitly map the IDs found in raw_frames (COCO) to our new IDs.
 COCO_TO_UNIFIED = {
     0: 0,   # Person -> Person
     1: 1,   # Bicycle -> Bicycle

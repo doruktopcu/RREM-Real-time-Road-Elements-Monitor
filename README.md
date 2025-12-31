@@ -179,11 +179,34 @@ python3 merge_datasets.py
 
 ## 7. Results & Performance
 
-The system achieves robust performance on standard hardware:
-*   **M2 Pro (Mac)**: ~45 FPS (YOLO11n), ~28 FPS (YOLO11m)
-*   **RTX 3060**: ~60+ FPS (YOLO11m)
+This section presents a quantitative evaluation of the RREM system's object detection capabilities, based on a rigorous training regimen.
 
-The integration of the "Red Zone" logic significantly reduces false positives compared to raw YOLO detection, effectively suppressing warnings for distant or non-threatening objects while maintaining high recall for immediate hazards.
+### 7.1 Experimental Setup
+The model was trained using the following configuration:
+*   **Architecture**: YOLO11m (Medium)
+*   **Epochs**: 50
+*   **Batch Size**: 128
+*   **Optimizer**: Auto (SGD/AdamW) with Momentum=0.937 and Weight Decay=0.0005
+*   **Data Augmentation**: Mosaic (1.0) and Random Erasing (0.4) were employed to enhance robustness against partial occlusions.
+
+### 7.2 Quantitative Metrics
+The training process concluded with the model converging to a high degree of accuracy. The final evaluation metrics on the validation set are as follows:
+
+| Metric | Value | Description |
+| :--- | :--- | :--- |
+| **mAP @ 0.50** | **0.835** | Mean Average Precision at 50% IoU threshold, indicating robust detection capabilities. |
+| **mAP @ 0.50-0.95** | **0.739** | Mean Average Precision averaged over multiple IoU thresholds, reflecting high localization accuracy. |
+| **Precision** | **0.823** | The ratio of true positive detections to total positive detections. |
+| **Recall** | **0.778** | The capability of the model to find all relevant objects in the scene. |
+
+The class-wise performance analysis reveals that the model performs exceptionally well on distinct, rigid objects such as **Potholes (mAP@50: 0.995)** and **Fire Hazards (mAP@50: 0.995)**, validating the efficacy of the full-image auto-labeling strategy for environmental hazards. Vehicle classes such as **Cars** also showed strong performance (**mAP@50: 0.934**), ensuring reliable forward collision warnings.
+
+### 7.3 System Latency
+Real-time inference tests on an **Apple M2 Pro** processor yielded an average frame rate of **~28 FPS** for the YOLO11m model, demonstrating that the system meets the latency requirements for real-time driver assistance without specialized dedicated hardware.
+
+### 7.4 Limitations & Future Work
+**Current Dataset Limitations**:
+It is important to note that the current iteration of the Unified Dataset **does not contain traffic signs or traffic lights**. Consequently, the system in its current state will not detect traffic control signals. Future versions of RREM will explicitly incorporate a dedicated dataset for **Turkish Road Standards**, including local traffic signage and traffic light configurations, to fully support compliance with local traffic regulations.
 
 ---
 

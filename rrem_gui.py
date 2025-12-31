@@ -69,7 +69,7 @@ class RREMGUI:
             "YOLOv11 Nano": "yolo11n.pt",
             "YOLOv11 Small": "yolo11s.pt",
             "YOLOv11 Medium": "yolo11m.pt",
-            "Custom RREM Model": "best.pt"
+            "Custom RREM Model": "RREM.pt"
         }
         
         self.model_var = tk.StringVar(value="YOLOv11 Nano")
@@ -210,8 +210,6 @@ class RREMGUI:
                     break
                 
                 # Pass BGR frame directly to main thread for resizing (faster)
-                # We need to make a copy if we want to store it for "seek" or "pause" redraws?
-                # Actually current_frame_img was used for redraws. Let's store the BGR frame.
                 self.current_frame_bgr = frame
                 
                 # Update GUI in main thread - passing the BGR numpy array

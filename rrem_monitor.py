@@ -144,8 +144,6 @@ class RREMMonitor:
         
         # Debug: Print classes if using custom model
         if relevant_classes is None:
-            # print(f"Classes: {result.names}") # Debugging
-            pass
 
         # --- HAZARD STABILIZER LOGIC ---
         h, w = frame.shape[:2]
@@ -214,7 +212,6 @@ class RREMMonitor:
         
         # Analyze using FILTERED boxes
         frame_shape = frame.shape
-        # lane_x1, lane_x2 = self.lane_tracker.update(frame) # Removed
         
         # Since we pre-filter with HazardStabilizer (Red Zone), 
         # everything passed to Analyzer is "In Lane" roughly.
@@ -240,9 +237,7 @@ class RREMMonitor:
         if dist_msg:
              # Draw distance warning
 
-            # Use a slightly lower position for distance alert so it doesn't overlap with main alert
-            # But draw_alert centers at top. Let's make a custom draw here or modify draw_alert.
-            # For now, just use draw_alert but maybe simpler.
+            # Draw distance alert
             
             # Custom draw for Distance
             font = cv2.FONT_HERSHEY_SIMPLEX

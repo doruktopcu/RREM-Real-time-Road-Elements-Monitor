@@ -11,7 +11,7 @@ ssl._create_default_https_context = ssl._create_unverified_context
 # Define the dataset path
 DATASET_DIR = "dataset/unlabeled_datasets"
 
-# Schema (from Implementation Plan):
+# Schema:
 # 0: Person, 1: Bicycle, 2: Car, 3: Motorcycle, 4: Bus, 5: Truck, 6: Cat, 7: Dog, 
 # 8: Traffic Light, 9: Stop Sign, 10: Accident, 11: Pothole, 12: Fire Hazard, 
 # 13: Fox, 14: Chicken, 15: Deer, 16: Horse, 17: Pigeon, 18: Sheep, 19: Cow
@@ -71,8 +71,7 @@ def auto_label():
             filename_no_ext = os.path.splitext(basename)[0]
             label_path = os.path.join(labels_dir, f"{filename_no_ext}.txt")
             
-            # For FULL IMAGE labeling: Overwrite if empty or strictly overwrite?
-            # User said files are empty. We should overwrite them.
+            # For FULL IMAGE labeling: Overwrite if empty
             # If type is inference: Skip if exists (Resume)
             
             is_full_label = config.get("type") == "full_image"
