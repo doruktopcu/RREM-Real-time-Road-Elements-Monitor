@@ -5,7 +5,6 @@
 
 ---
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1N8frlROTmB2yyXLA4JnXkHSZwQfkLorx?usp=sharing)
 
 ## Abstract
 
@@ -167,6 +166,11 @@ Running on Webcam:
 python3 rrem_monitor.py --source 0
 ```
 
+Running with GUI:
+```bash
+python3 rrem_gui.py
+```
+
 **2. Dataset Tools**
 To regenerate the unified dataset:
 ```bash
@@ -205,6 +209,8 @@ The class-wise performance analysis reveals that the model performs exceptionall
 
 ### 7.3 System Latency
 Real-time inference tests were conducted on an **Apple M1 Pro MacBook** using the Metal Performance Shaders (MPS) backend. The system achieved a variable frame rate of **15-30 FPS** for the YOLO11m model. This performance demonstrates that RREM meets the latency requirements for real-time driver assistance on accessible, consumer-grade hardware. It is worth noting that while the model training was accelerated using an enterprise-grade **NVIDIA A100 GPU**, the inference performance reported here is exclusively based on the Apple Silicon platform, reflecting the target deployment environment.
+
+Trained on [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1N8frlROTmB2yyXLA4JnXkHSZwQfkLorx?usp=sharing) 
 
 ### 7.4 Limitations & Future Work
 While the current system demonstrates robust performance, we acknowledge several limitations that will guide future development:
